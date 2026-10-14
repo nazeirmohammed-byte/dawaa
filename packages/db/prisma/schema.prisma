@@ -1,0 +1,1203 @@
+// Identity plus the pharmacy operations slice (catalog, stock, purchasing, sales, finance, settings).
+// SQL Server has no Prisma enums; constrained strings live in infra/sql/004_checks.sql and 005_ops_checks.sql.
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/client"
+}
+
+datasource db {
+  provider = "sqlserver"
+  url      = env("DATABASE_URL")
+}
+
+model Tenant {
+  id            String    @id @default(uuid()) @db.UniqueIdentifier
+  type          String    @db.NVarChar(32)
+  dbMode        String    @default("SHARED") @db.NVarChar(32)
+  status        String    @default("TRIAL") @db.NVarChar(32)
+  tradeNameAr   String    @db.NVarChar(200)
+  tradeNameEn   String?   @db.NVarChar(200)
+  licenseNumber String?   @db.NVarChar(100)
+  phone         String?   @db.NVarChar(20)
+  email         String?   @db.NVarChar(320)
+  featureFlags  String    @default("[]") @db.NVarChar(Max)
+  trialEndsAt         DateTime? @db.DateTime2
+  branchLimit         Int       @default(1)
+  verificationStatus  String    @default("VALID") @db.NVarChar(16)
+  ownerName           String    @default("") @db.NVarChar(200)
+  addressLine         String    @default("") @db.NVarChar(300)
+  pharmacistName      String    @default("") @db.NVarChar(200)
+  pharmacistLicense   String    @default("") @db.NVarChar(100)
+  readOnly            Boolean   @default(false)
+  supportNotes        String    @default("") @db.NVarChar(1000)
+  createdAt     DateTime  @default(now()) @db.DateTime2
+  createdBy     String?   @db.UniqueIdentifier
+  updatedAt     DateTime  @updatedAt @db.DateTime2
+  updatedBy     String?   @db.UniqueIdentifier
+  rowVersion    Unsupported("timestamp")?
+
+  branches        Branch[]
+  users           User[]
+  roles           Role[]
+  permissions     Permission[]
+  rolePermissions RolePermission[]
+  userBranchRoles UserBranchRole[]
+  refreshSessions RefreshSession[]
+  auditLogs          AuditLog[]
+  devices            Device[]
+  operationalSignals OperationalSignal[]
+  receiptDrafts      ReceiptDraft[]
+  categories         Category[]
+  products           Product[]
+  stockLots          StockLot[]
+  stockMovements     StockMovement[]
+  suppliers          Supplier[]
+  purchaseOrders     PurchaseOrder[]
+  purchaseLines      PurchaseLine[]
+  customers          Customer[]
+  sales              Sale[]
+  saleLines          SaleLine[]
+  ledgerAccounts     LedgerAccount[]
+  journalEntries     JournalEntry[]
+  journalLines       JournalLine[]
+  expenses           Expense[]
+  pharmacySettings   PharmacySetting[]
+  priceLists         PriceList[]
+  priceActivations   BranchPriceActivation[]
+  productPrices      ProductPrice[]
+  exchangeRates      ExchangeRate[]
+  priceBatches       PriceListChangeBatch[]
+  priceHistories     PriceHistory[]
+
+  @@map("Tenants")
+}
+
+model Branch {
+  id           String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId     String   @db.UniqueIdentifier
+  code         String   @db.NVarChar(32)
+  nameAr       String   @db.NVarChar(200)
+  nameEn       String?  @db.NVarChar(200)
+  isHeadOffice Boolean  @default(false)
+  state        String?  @db.NVarChar(100)
+  city         String?  @db.NVarChar(100)
+  phone        String?  @db.NVarChar(20)
+  isDeleted    Boolean  @default(false)
+  createdAt    DateTime @default(now()) @db.DateTime2
+  createdBy    String?  @db.UniqueIdentifier
+  updatedAt    DateTime @updatedAt @db.DateTime2
+  updatedBy    String?  @db.UniqueIdentifier
+  rowVersion   Unsupported("timestamp")?
+
+  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  userBranchRoles UserBranchRole[]
+  devices         Device[]
+  receiptDrafts   ReceiptDraft[]
+  stockLots       StockLot[]
+  stockMovements  StockMovement[]
+  purchaseOrders  PurchaseOrder[]
+  sales             Sale[]
+  expenses          Expense[]
+  priceActivations  BranchPriceActivation[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("Branches")
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId     String   @db.UniqueIdentifier
+  email        String?  @db.NVarChar(320)
+  phone        String?  @db.NVarChar(20)
+  passwordHash String   @db.NVarChar(255)
+  pinHash      String?  @db.NVarChar(255)
+  displayName  String   @db.NVarChar(200)
+  isActive     Boolean   @default(true)
+  isDeleted    Boolean   @default(false)
+  lastLoginAt  DateTime? @db.DateTime2
+  failedLogins Int       @default(0)
+  lockedAt      DateTime? @db.DateTime2
+  forceOtp      Boolean   @default(false)
+  otpHash       String?   @db.NVarChar(255)
+  otpExpiresAt  DateTime? @db.DateTime2
+  createdAt    DateTime  @default(now()) @db.DateTime2
+  createdBy    String?  @db.UniqueIdentifier
+  updatedAt    DateTime @updatedAt @db.DateTime2
+  updatedBy    String?  @db.UniqueIdentifier
+  rowVersion   Unsupported("timestamp")?
+
+  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  branchRoles     UserBranchRole[]
+  refreshSessions RefreshSession[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@index([tenantId, email])
+  @@index([tenantId, phone])
+  @@map("Users")
+}
+
+model Role {
+  id        String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId  String   @db.UniqueIdentifier
+  code      String   @db.NVarChar(64)
+  nameAr    String   @db.NVarChar(200)
+  nameEn    String   @db.NVarChar(200)
+  isSystem  Boolean  @default(true)
+  isDeleted Boolean  @default(false)
+  createdAt DateTime @default(now()) @db.DateTime2
+  createdBy String?  @db.UniqueIdentifier
+  updatedAt DateTime @updatedAt @db.DateTime2
+  updatedBy String?  @db.UniqueIdentifier
+  rowVersion Unsupported("timestamp")?
+
+  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  rolePermissions RolePermission[]
+  userBranchRoles UserBranchRole[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("Roles")
+}
+
+model Permission {
+  id        String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId  String   @db.UniqueIdentifier
+  code      String   @db.NVarChar(100)
+  nameAr    String   @db.NVarChar(200)
+  nameEn    String   @db.NVarChar(200)
+  isDeleted Boolean  @default(false)
+  createdAt DateTime @default(now()) @db.DateTime2
+  createdBy String?  @db.UniqueIdentifier
+  updatedAt DateTime @updatedAt @db.DateTime2
+  updatedBy String?  @db.UniqueIdentifier
+  rowVersion Unsupported("timestamp")?
+
+  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  rolePermissions RolePermission[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("Permissions")
+}
+
+model RolePermission {
+  id           String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId     String   @db.UniqueIdentifier
+  roleId       String   @db.UniqueIdentifier
+  permissionId String   @db.UniqueIdentifier
+  createdAt    DateTime @default(now()) @db.DateTime2
+  createdBy    String?  @db.UniqueIdentifier
+  updatedAt    DateTime @updatedAt @db.DateTime2
+  updatedBy    String?  @db.UniqueIdentifier
+  rowVersion   Unsupported("timestamp")?
+
+  tenant     Tenant     @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  role       Role       @relation(fields: [tenantId, roleId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  permission Permission @relation(fields: [tenantId, permissionId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, roleId, permissionId])
+  @@index([tenantId])
+  @@map("RolePermissions")
+}
+
+model UserBranchRole {
+  id        String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId  String   @db.UniqueIdentifier
+  userId    String   @db.UniqueIdentifier
+  branchId  String   @db.UniqueIdentifier
+  roleId    String   @db.UniqueIdentifier
+  createdAt DateTime @default(now()) @db.DateTime2
+  createdBy String?  @db.UniqueIdentifier
+  updatedAt DateTime @updatedAt @db.DateTime2
+  updatedBy String?  @db.UniqueIdentifier
+  rowVersion Unsupported("timestamp")?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  user   User   @relation(fields: [tenantId, userId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  branch Branch @relation(fields: [tenantId, branchId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  role   Role   @relation(fields: [tenantId, roleId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, userId, branchId, roleId])
+  @@index([tenantId])
+  @@map("UserBranchRoles")
+}
+
+model RefreshSession {
+  id           String    @id @default(uuid()) @db.UniqueIdentifier
+  tenantId     String    @db.UniqueIdentifier
+  userId       String    @db.UniqueIdentifier
+  tokenHash    String    @db.NVarChar(128)
+  expiresAt    DateTime  @db.DateTime2
+  revokedAt    DateTime? @db.DateTime2
+  replacedById String?   @db.UniqueIdentifier
+  userAgent    String?   @db.NVarChar(400)
+  ipAddress    String?   @db.NVarChar(64)
+  createdAt    DateTime  @default(now()) @db.DateTime2
+  createdBy    String?   @db.UniqueIdentifier
+  updatedAt    DateTime  @updatedAt @db.DateTime2
+  updatedBy    String?   @db.UniqueIdentifier
+  rowVersion   Unsupported("timestamp")?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  user   User   @relation(fields: [tenantId, userId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@index([tokenHash])
+  @@map("RefreshSessions")
+}
+
+model AuditLog {
+  id         String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId   String   @db.UniqueIdentifier
+  actorId    String?  @db.UniqueIdentifier
+  action     String   @db.NVarChar(100)
+  entityType String   @db.NVarChar(100)
+  entityId   String?  @db.UniqueIdentifier
+  details    String?  @db.NVarChar(Max)
+  branchId   String?  @db.UniqueIdentifier
+  ipAddress  String?  @db.NVarChar(64)
+  oldJson    String?  @db.NVarChar(Max)
+  newJson    String?  @db.NVarChar(Max)
+  createdAt  DateTime @default(now()) @db.DateTime2
+  createdBy  String?  @db.UniqueIdentifier
+  updatedAt  DateTime @updatedAt @db.DateTime2
+  updatedBy  String?  @db.UniqueIdentifier
+  rowVersion Unsupported("timestamp")?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, createdAt])
+  @@map("AuditLogs")
+}
+
+model Device {
+  id         String    @id @default(uuid()) @db.UniqueIdentifier
+  tenantId   String    @db.UniqueIdentifier
+  branchId   String    @db.UniqueIdentifier
+  name       String    @db.NVarChar(200)
+  isActive   Boolean   @default(true)
+  isDeleted  Boolean   @default(false)
+  lastSyncAt DateTime? @db.DateTime2
+  createdAt  DateTime  @default(now()) @db.DateTime2
+  createdBy  String?   @db.UniqueIdentifier
+  updatedAt  DateTime  @updatedAt @db.DateTime2
+  updatedBy  String?   @db.UniqueIdentifier
+  rowVersion Unsupported("timestamp")?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  branch Branch @relation(fields: [tenantId, branchId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("Devices")
+}
+
+/// Seeded operations board for the demo tenant. Live stock and sales replace this in later phases.
+model OperationalSignal {
+  id         String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId   String   @db.UniqueIdentifier
+  branchId   String?  @db.UniqueIdentifier
+  lane       String   @db.NVarChar(32)
+  severity   String   @db.NVarChar(16)
+  code       String   @db.NVarChar(64)
+  titleAr    String   @db.NVarChar(200)
+  titleEn    String   @db.NVarChar(200)
+  detailAr   String   @db.NVarChar(500)
+  detailEn   String   @db.NVarChar(500)
+  figureAr   String   @db.NVarChar(40)
+  figureEn   String   @db.NVarChar(40)
+  sortOrder  Int
+  createdAt  DateTime @default(now()) @db.DateTime2
+  createdBy  String?  @db.UniqueIdentifier
+  updatedAt  DateTime @updatedAt @db.DateTime2
+  updatedBy  String?  @db.UniqueIdentifier
+  rowVersion Unsupported("timestamp")?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, lane, sortOrder])
+  @@map("OperationalSignals")
+}
+
+/// One sample 58 mm receipt so the print preview is tenant data, not a hardcoded price in the UI.
+model ReceiptDraft {
+  id            String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId      String   @db.UniqueIdentifier
+  branchId      String   @db.UniqueIdentifier
+  receiptNo     String   @db.NVarChar(32)
+  cashierName   String   @db.NVarChar(200)
+  soldAt        DateTime @db.DateTime2
+  linesJson     String   @db.NVarChar(Max)
+  subtotal      Decimal  @db.Decimal(18, 2)
+  discount      Decimal  @db.Decimal(18, 2)
+  total         Decimal  @db.Decimal(18, 2)
+  paid          Decimal  @db.Decimal(18, 2)
+  changeDue     Decimal  @db.Decimal(18, 2)
+  paymentMethod String   @db.NVarChar(32)
+  createdAt     DateTime @default(now()) @db.DateTime2
+  createdBy     String?  @db.UniqueIdentifier
+  updatedAt     DateTime @updatedAt @db.DateTime2
+  updatedBy     String?  @db.UniqueIdentifier
+  rowVersion    Unsupported("timestamp")?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  branch Branch @relation(fields: [tenantId, branchId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("ReceiptDrafts")
+}
+
+model Category {
+  id         String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId   String   @db.UniqueIdentifier
+  nameAr     String   @db.NVarChar(200)
+  nameEn     String   @db.NVarChar(200)
+  isDeleted  Boolean  @default(false)
+  createdAt  DateTime @default(now()) @db.DateTime2
+  createdBy  String?  @db.UniqueIdentifier
+  updatedAt  DateTime @updatedAt @db.DateTime2
+  updatedBy  String?  @db.UniqueIdentifier
+  rowVersion Unsupported("timestamp")?
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  products Product[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("Categories")
+}
+
+model Product {
+  id           String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId     String   @db.UniqueIdentifier
+  categoryId   String   @db.UniqueIdentifier
+  sku          String   @db.NVarChar(64)
+  nameAr       String   @db.NVarChar(200)
+  nameEn       String   @db.NVarChar(200)
+  genericName  String   @db.NVarChar(200)
+  form         String   @db.NVarChar(80)
+  strength     String   @db.NVarChar(80)
+  reorderLevel Int
+  sellPrice    Decimal  @db.Decimal(18, 2)
+  costPrice    Decimal  @db.Decimal(18, 2)
+  costUsd      Decimal? @db.Decimal(18, 2)
+  isControlled Boolean  @default(false)
+  isLocal      Boolean  @default(true)
+  trackSerial  Boolean  @default(false)
+  masterCode   String?  @db.NVarChar(64)
+  gtin         String?  @db.NVarChar(32)
+  shelfLifeMonths Int?
+  isDeleted    Boolean  @default(false)
+  createdAt    DateTime @default(now()) @db.DateTime2
+  createdBy    String?  @db.UniqueIdentifier
+  updatedAt    DateTime @updatedAt @db.DateTime2
+  updatedBy    String?  @db.UniqueIdentifier
+  rowVersion   Unsupported("timestamp")?
+
+  tenant        Tenant          @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  category      Category        @relation(fields: [tenantId, categoryId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  lots          StockLot[]
+  movements     StockMovement[]
+  purchaseLines PurchaseLine[]
+  saleLines     SaleLine[]
+  prices        ProductPrice[]
+  priceHistories PriceHistory[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, sku])
+  @@index([tenantId])
+  @@map("Products")
+}
+
+model StockLot {
+  id         String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId   String   @db.UniqueIdentifier
+  branchId   String   @db.UniqueIdentifier
+  productId  String   @db.UniqueIdentifier
+  batchNo        String    @db.NVarChar(64)
+  expiry         DateTime  @db.DateTime2
+  manufacturedAt DateTime? @db.DateTime2
+  serialNo       String?   @db.NVarChar(64)
+  unitCode       String    @default("BASE") @db.NVarChar(32)
+  bonusQty       Int       @default(0)
+  qtyBase        Int
+  location       String    @db.NVarChar(100)
+  createdAt  DateTime @default(now()) @db.DateTime2
+  createdBy  String?  @db.UniqueIdentifier
+  updatedAt  DateTime @updatedAt @db.DateTime2
+  updatedBy  String?  @db.UniqueIdentifier
+  rowVersion Unsupported("timestamp")?
+
+  tenant     Tenant          @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  branch     Branch          @relation(fields: [tenantId, branchId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  product    Product         @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  movements  StockMovement[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId, productId, expiry])
+  @@map("StockLots")
+}
+
+model StockMovement {
+  id        String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId  String   @db.UniqueIdentifier
+  branchId  String   @db.UniqueIdentifier
+  productId String   @db.UniqueIdentifier
+  lotId     String   @db.UniqueIdentifier
+  type      String   @db.NVarChar(32)
+  qtyBase   Int
+  note      String   @db.NVarChar(300)
+  refType   String   @db.NVarChar(32)
+  refId     String?  @db.UniqueIdentifier
+  createdAt DateTime @default(now()) @db.DateTime2
+  createdBy String?  @db.UniqueIdentifier
+  updatedAt DateTime @updatedAt @db.DateTime2
+  updatedBy String?  @db.UniqueIdentifier
+  rowVersion Unsupported("timestamp")?
+
+  tenant  Tenant   @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  branch  Branch   @relation(fields: [tenantId, branchId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  product Product  @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  lot     StockLot @relation(fields: [tenantId, lotId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, createdAt])
+  @@map("StockMovements")
+}
+
+model Supplier {
+  id        String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId  String   @db.UniqueIdentifier
+  nameAr    String   @db.NVarChar(200)
+  nameEn    String   @db.NVarChar(200)
+  phone     String?  @db.NVarChar(20)
+  city      String?  @db.NVarChar(100)
+  balance   Decimal  @default(0) @db.Decimal(18, 2)
+  isDeleted Boolean  @default(false)
+  createdAt DateTime @default(now()) @db.DateTime2
+  createdBy String?  @db.UniqueIdentifier
+  updatedAt DateTime @updatedAt @db.DateTime2
+  updatedBy String?  @db.UniqueIdentifier
+  rowVersion Unsupported("timestamp")?
+
+  tenant   Tenant          @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  orders   PurchaseOrder[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("Suppliers")
+}
+
+model PurchaseOrder {
+  id         String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId   String   @db.UniqueIdentifier
+  branchId   String   @db.UniqueIdentifier
+  supplierId String   @db.UniqueIdentifier
+  docNo      String   @db.NVarChar(32)
+  status     String   @db.NVarChar(32)
+  total      Decimal  @db.Decimal(18, 2)
+  orderedAt  DateTime @db.DateTime2
+  createdAt  DateTime @default(now()) @db.DateTime2
+  createdBy  String?  @db.UniqueIdentifier
+  updatedAt  DateTime @updatedAt @db.DateTime2
+  updatedBy  String?  @db.UniqueIdentifier
+  rowVersion Unsupported("timestamp")?
+
+  tenant   Tenant         @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  branch   Branch         @relation(fields: [tenantId, branchId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  supplier Supplier       @relation(fields: [tenantId, supplierId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  lines    PurchaseLine[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, docNo])
+  @@index([tenantId])
+  @@map("PurchaseOrders")
+}
+
+model PurchaseLine {
+  id         String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId   String   @db.UniqueIdentifier
+  purchaseId String   @db.UniqueIdentifier
+  productId  String   @db.UniqueIdentifier
+  qty        Int
+  unitCost   Decimal  @db.Decimal(18, 2)
+  lineTotal  Decimal  @db.Decimal(18, 2)
+  createdAt  DateTime @default(now()) @db.DateTime2
+  createdBy  String?  @db.UniqueIdentifier
+  updatedAt  DateTime @updatedAt @db.DateTime2
+  updatedBy  String?  @db.UniqueIdentifier
+  rowVersion Unsupported("timestamp")?
+
+  tenant   Tenant        @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  purchase PurchaseOrder @relation(fields: [tenantId, purchaseId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  product  Product       @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("PurchaseLines")
+}
+
+model Customer {
+  id        String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId  String   @db.UniqueIdentifier
+  nameAr    String   @db.NVarChar(200)
+  nameEn    String   @db.NVarChar(200)
+  phone     String?  @db.NVarChar(20)
+  balance   Decimal  @default(0) @db.Decimal(18, 2)
+  isDeleted Boolean  @default(false)
+  createdAt DateTime @default(now()) @db.DateTime2
+  createdBy String?  @db.UniqueIdentifier
+  updatedAt DateTime @updatedAt @db.DateTime2
+  updatedBy String?  @db.UniqueIdentifier
+  rowVersion Unsupported("timestamp")?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("Customers")
+}
+
+model Sale {
+  id            String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId      String   @db.UniqueIdentifier
+  branchId      String   @db.UniqueIdentifier
+  docNo         String   @db.NVarChar(32)
+  customerName  String   @db.NVarChar(200)
+  cashierName   String   @db.NVarChar(200)
+  soldAt        DateTime @db.DateTime2
+  subtotal      Decimal  @db.Decimal(18, 2)
+  discount      Decimal  @db.Decimal(18, 2)
+  total         Decimal  @db.Decimal(18, 2)
+  paid          Decimal  @db.Decimal(18, 2)
+  changeDue     Decimal  @db.Decimal(18, 2)
+  paymentMethod String   @db.NVarChar(32)
+  status        String   @db.NVarChar(32)
+  createdAt     DateTime @default(now()) @db.DateTime2
+  createdBy     String?  @db.UniqueIdentifier
+  updatedAt     DateTime @updatedAt @db.DateTime2
+  updatedBy     String?  @db.UniqueIdentifier
+  rowVersion    Unsupported("timestamp")?
+
+  tenant Tenant     @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  branch Branch     @relation(fields: [tenantId, branchId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  lines  SaleLine[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, docNo])
+  @@index([tenantId, soldAt])
+  @@map("Sales")
+}
+
+model SaleLine {
+  id        String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId  String   @db.UniqueIdentifier
+  saleId    String   @db.UniqueIdentifier
+  productId String   @db.UniqueIdentifier
+  nameAr    String   @db.NVarChar(200)
+  nameEn    String   @db.NVarChar(200)
+  qty       Int
+  unitPrice          Decimal  @db.Decimal(18, 2)
+  lineTotal          Decimal  @db.Decimal(18, 2)
+  costTotal          Decimal  @db.Decimal(18, 2)
+  unitCost           Decimal? @db.Decimal(18, 2)
+  discountAmount     Decimal  @default(0) @db.Decimal(18, 2)
+  priceListId        String?  @db.UniqueIdentifier
+  priceListVersionNo Int?
+  createdAt DateTime @default(now()) @db.DateTime2
+  createdBy String?  @db.UniqueIdentifier
+  updatedAt DateTime @updatedAt @db.DateTime2
+  updatedBy String?  @db.UniqueIdentifier
+  rowVersion Unsupported("timestamp")?
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  sale    Sale    @relation(fields: [tenantId, saleId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  product Product @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("SaleLines")
+}
+
+model LedgerAccount {
+  id        String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId  String   @db.UniqueIdentifier
+  code      String   @db.NVarChar(16)
+  nameAr    String   @db.NVarChar(200)
+  nameEn    String   @db.NVarChar(200)
+  kind      String   @db.NVarChar(32)
+  balance   Decimal  @default(0) @db.Decimal(18, 2)
+  isDeleted Boolean  @default(false)
+  createdAt DateTime @default(now()) @db.DateTime2
+  createdBy String?  @db.UniqueIdentifier
+  updatedAt DateTime @updatedAt @db.DateTime2
+  updatedBy String?  @db.UniqueIdentifier
+  rowVersion Unsupported("timestamp")?
+
+  tenant   Tenant        @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  lines    JournalLine[]
+  expenses Expense[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("LedgerAccounts")
+}
+
+model JournalEntry {
+  id        String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId  String   @db.UniqueIdentifier
+  docNo     String   @db.NVarChar(32)
+  memoAr    String   @db.NVarChar(300)
+  memoEn    String   @db.NVarChar(300)
+  postedAt  DateTime @db.DateTime2
+  createdAt DateTime @default(now()) @db.DateTime2
+  createdBy String?  @db.UniqueIdentifier
+  updatedAt DateTime @updatedAt @db.DateTime2
+  updatedBy String?  @db.UniqueIdentifier
+  rowVersion Unsupported("timestamp")?
+
+  tenant Tenant        @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  lines  JournalLine[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, docNo])
+  @@index([tenantId, postedAt])
+  @@map("JournalEntries")
+}
+
+model JournalLine {
+  id        String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId  String   @db.UniqueIdentifier
+  entryId   String   @db.UniqueIdentifier
+  accountId String   @db.UniqueIdentifier
+  debit     Decimal  @db.Decimal(18, 2)
+  credit    Decimal  @db.Decimal(18, 2)
+  createdAt DateTime @default(now()) @db.DateTime2
+  createdBy String?  @db.UniqueIdentifier
+  updatedAt DateTime @updatedAt @db.DateTime2
+  updatedBy String?  @db.UniqueIdentifier
+  rowVersion Unsupported("timestamp")?
+
+  tenant  Tenant         @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  entry   JournalEntry   @relation(fields: [tenantId, entryId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  account LedgerAccount  @relation(fields: [tenantId, accountId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("JournalLines")
+}
+
+model Expense {
+  id        String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId  String   @db.UniqueIdentifier
+  branchId  String   @db.UniqueIdentifier
+  accountId String   @db.UniqueIdentifier
+  titleAr   String   @db.NVarChar(200)
+  titleEn   String   @db.NVarChar(200)
+  amount    Decimal  @db.Decimal(18, 2)
+  spentAt   DateTime @db.DateTime2
+  createdAt DateTime @default(now()) @db.DateTime2
+  createdBy String?  @db.UniqueIdentifier
+  updatedAt DateTime @updatedAt @db.DateTime2
+  updatedBy String?  @db.UniqueIdentifier
+  rowVersion Unsupported("timestamp")?
+
+  tenant  Tenant        @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  branch  Branch        @relation(fields: [tenantId, branchId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  account LedgerAccount @relation(fields: [tenantId, accountId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, spentAt])
+  @@map("Expenses")
+}
+
+model PharmacySetting {
+  id        String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId  String   @db.UniqueIdentifier
+  key       String   @db.NVarChar(64)
+  valueAr   String   @db.NVarChar(400)
+  valueEn   String   @db.NVarChar(400)
+  createdAt DateTime @default(now()) @db.DateTime2
+  createdBy String?  @db.UniqueIdentifier
+  updatedAt DateTime @updatedAt @db.DateTime2
+  updatedBy String?  @db.UniqueIdentifier
+  rowVersion Unsupported("timestamp")?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, key])
+  @@index([tenantId])
+  @@map("PharmacySettings")
+}
+
+/// Platform catalog. Not tenant-owned, so it is not under row-level security.
+model StandardMedicine {
+  id           String @id @default(uuid()) @db.UniqueIdentifier
+  code         String @unique @db.NVarChar(64)
+  nameAr       String @db.NVarChar(200)
+  nameEn       String @db.NVarChar(200)
+  genericName  String @db.NVarChar(200)
+  form         String @db.NVarChar(80)
+  strength     String @db.NVarChar(80)
+  categoryAr           String  @db.NVarChar(200)
+  categoryEn           String  @db.NVarChar(200)
+  route                String  @default("") @db.NVarChar(80)
+  manufacturer         String  @default("") @db.NVarChar(200)
+  country              String  @default("") @db.NVarChar(80)
+  packDescription      String  @default("") @db.NVarChar(200)
+  unitsJson            String  @default("{\"box\":1}") @db.NVarChar(400)
+  gtin                 String  @default("") @db.NVarChar(32)
+  ingredients          String  @default("") @db.NVarChar(400)
+  atcCode              String  @default("") @db.NVarChar(16)
+  status               String  @default("PUBLISHED") @db.NVarChar(16)
+  isControlled         Boolean @default(false)
+  requiresPrescription Boolean @default(false)
+  trackSerial          Boolean @default(false)
+
+  @@map("StandardMedicines")
+}
+
+model DosageForm {
+  id     String @id @default(uuid()) @db.UniqueIdentifier
+  code   String @unique @db.NVarChar(40)
+  nameEn String @db.NVarChar(80)
+  nameAr String @db.NVarChar(80)
+
+  @@map("DosageForms")
+}
+
+model PriceList {
+  id        String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId  String   @db.UniqueIdentifier
+  nameAr    String   @db.NVarChar(200)
+  nameEn    String   @db.NVarChar(200)
+  scope             String    @db.NVarChar(16)
+  isActive          Boolean   @default(false)
+  code              String    @default("") @db.NVarChar(32)
+  listType          String    @default("GENERAL") @db.NVarChar(16)
+  status            String    @default("DRAFT") @db.NVarChar(16)
+  versionNo         Int       @default(1)
+  sourcePriceListId String?   @db.UniqueIdentifier
+  exchangeRateUsed  Decimal?  @db.Decimal(18, 2)
+  effectiveFrom     DateTime? @db.DateTime2
+  effectiveTo       DateTime? @db.DateTime2
+  activatedAt       DateTime? @db.DateTime2
+  activatedBy       String?   @db.UniqueIdentifier
+  notes             String    @default("") @db.NVarChar(400)
+  createdAt         DateTime  @default(now()) @db.DateTime2
+  createdBy String?  @db.UniqueIdentifier
+  updatedAt DateTime @updatedAt @db.DateTime2
+  updatedBy String?  @db.UniqueIdentifier
+  rowVersion Unsupported("timestamp")?
+
+  tenant      Tenant                  @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  prices      ProductPrice[]
+  activations BranchPriceActivation[]
+  batches     PriceListChangeBatch[]
+  histories   PriceHistory[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("PriceLists")
+}
+
+model BranchPriceActivation {
+  id          String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId    String   @db.UniqueIdentifier
+  branchId    String   @db.UniqueIdentifier
+  priceListId String   @db.UniqueIdentifier
+  isActive    Boolean  @default(false)
+  createdAt   DateTime @default(now()) @db.DateTime2
+  createdBy   String?  @db.UniqueIdentifier
+  updatedAt   DateTime @updatedAt @db.DateTime2
+  updatedBy   String?  @db.UniqueIdentifier
+  rowVersion  Unsupported("timestamp")?
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  branch    Branch    @relation(fields: [tenantId, branchId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  priceList PriceList @relation(fields: [tenantId, priceListId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, branchId, priceListId])
+  @@index([tenantId])
+  @@map("BranchPriceActivations")
+}
+
+model ProductPrice {
+  id          String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId    String   @db.UniqueIdentifier
+  priceListId String   @db.UniqueIdentifier
+  productId        String   @db.UniqueIdentifier
+  amount           Decimal  @db.Decimal(18, 2)
+  costReference    Decimal? @db.Decimal(18, 2)
+  marginPct        Decimal? @db.Decimal(18, 2)
+  isManualOverride Boolean  @default(false)
+  createdAt        DateTime @default(now()) @db.DateTime2
+  createdBy   String?  @db.UniqueIdentifier
+  updatedAt   DateTime @updatedAt @db.DateTime2
+  updatedBy   String?  @db.UniqueIdentifier
+  rowVersion  Unsupported("timestamp")?
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  priceList PriceList @relation(fields: [tenantId, priceListId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  product   Product   @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, priceListId, productId])
+  @@index([tenantId])
+  @@map("ProductPrices")
+}
+
+model ExchangeRate {
+  id        String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId  String   @db.UniqueIdentifier
+  currency  String   @default("USD") @db.NVarChar(8)
+  rate      Decimal  @db.Decimal(18, 2)
+  notedAt   DateTime @db.DateTime2
+  createdAt DateTime @default(now()) @db.DateTime2
+  createdBy String?  @db.UniqueIdentifier
+  updatedAt DateTime @updatedAt @db.DateTime2
+  updatedBy String?  @db.UniqueIdentifier
+  rowVersion Unsupported("timestamp")?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, notedAt])
+  @@map("ExchangeRates")
+}
+
+model PriceListChangeBatch {
+  id           String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId     String   @db.UniqueIdentifier
+  priceListId  String   @db.UniqueIdentifier
+  ruleName     String   @map("ruleName") @db.NVarChar(32)
+  filterText   String   @db.NVarChar(200)
+  valueText    String   @db.NVarChar(64)
+  rowsAffected Int
+  createdAt    DateTime @default(now()) @db.DateTime2
+  createdBy    String?  @db.UniqueIdentifier
+  updatedAt    DateTime @updatedAt @db.DateTime2
+  updatedBy    String?  @db.UniqueIdentifier
+  rowVersion   Unsupported("timestamp")?
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  priceList PriceList @relation(fields: [tenantId, priceListId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, priceListId])
+  @@map("PriceListChangeBatches")
+}
+
+model PriceHistory {
+  id          String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId    String   @db.UniqueIdentifier
+  priceListId String   @db.UniqueIdentifier
+  productId   String   @db.UniqueIdentifier
+  oldAmount   Decimal  @db.Decimal(18, 2)
+  newAmount   Decimal  @db.Decimal(18, 2)
+  createdAt   DateTime @default(now()) @db.DateTime2
+  createdBy   String?  @db.UniqueIdentifier
+  updatedAt   DateTime @updatedAt @db.DateTime2
+  updatedBy   String?  @db.UniqueIdentifier
+  rowVersion  Unsupported("timestamp")?
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  priceList PriceList @relation(fields: [tenantId, priceListId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  product   Product   @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, productId, createdAt])
+  @@map("PriceHistories")
+}
+
+model PlatformRole {
+  id          String   @id @default(uuid()) @db.UniqueIdentifier
+  code        String   @unique @db.NVarChar(64)
+  nameAr      String   @db.NVarChar(200)
+  nameEn      String   @db.NVarChar(200)
+  users       PlatformUser[]
+  permissions PlatformRolePermission[]
+
+  @@map("PlatformRoles")
+}
+
+model PlatformPermission {
+  id    String @id @default(uuid()) @db.UniqueIdentifier
+  code  String @unique @db.NVarChar(100)
+  nameAr String @db.NVarChar(200)
+  nameEn String @db.NVarChar(200)
+  roles PlatformRolePermission[]
+
+  @@map("PlatformPermissions")
+}
+
+model PlatformRolePermission {
+  roleId       String @db.UniqueIdentifier
+  permissionId String @db.UniqueIdentifier
+  role         PlatformRole       @relation(fields: [roleId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  permission   PlatformPermission @relation(fields: [permissionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@id([roleId, permissionId])
+  @@map("PlatformRolePermissions")
+}
+
+model PlatformUser {
+  id           String    @id @default(uuid()) @db.UniqueIdentifier
+  email        String    @unique @db.NVarChar(320)
+  displayName  String    @db.NVarChar(200)
+  passwordHash String    @db.NVarChar(255)
+  roleId       String    @db.UniqueIdentifier
+  isActive     Boolean   @default(true)
+  lastLoginAt  DateTime? @db.DateTime2
+  failedLogins Int       @default(0)
+  createdAt    DateTime  @default(now()) @db.DateTime2
+  updatedAt    DateTime? @db.DateTime2
+  rowVersion   Unsupported("timestamp")?
+  role         PlatformRole @relation(fields: [roleId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@map("PlatformUsers")
+}
+
+model Plan {
+  id            String  @id @default(uuid()) @db.UniqueIdentifier
+  code          String  @unique @db.NVarChar(32)
+  tenantType    String  @db.NVarChar(32)
+  nameAr        String  @db.NVarChar(200)
+  nameEn        String  @db.NVarChar(200)
+  monthlyPrice  Decimal @db.Decimal(18, 2)
+  yearlyPrice   Decimal @db.Decimal(18, 2)
+  setupFee      Decimal @db.Decimal(18, 2)
+  headOfficeFee Decimal @db.Decimal(18, 2)
+  features      String  @db.NVarChar(Max)
+  limits        String  @db.NVarChar(Max)
+  isActive      Boolean @default(true)
+
+  @@map("Plans")
+}
+
+model SubscriptionRequest {
+  id                  String   @id @default(uuid()) @db.UniqueIdentifier
+  status              String   @db.NVarChar(32)
+  tradeNameAr         String   @db.NVarChar(200)
+  tradeNameEn         String   @db.NVarChar(200)
+  ownerName           String   @db.NVarChar(200)
+  ownerPhone          String   @db.NVarChar(20)
+  ownerEmail          String   @db.NVarChar(320)
+  pharmacistName      String   @db.NVarChar(200)
+  pharmacistLicense   String   @db.NVarChar(100)
+  pharmacyLicense     String   @db.NVarChar(100)
+  stateName           String   @db.NVarChar(100)
+  city                String   @db.NVarChar(100)
+  addressLine         String   @db.NVarChar(300)
+  planCode            String   @db.NVarChar(32)
+  branchCount         Int
+  userCount           Int
+  deviceCount         Int
+  note                String   @default("") @db.NVarChar(1000)
+  rejectionReason     String   @default("") @db.NVarChar(500)
+  tenantId            String?  @db.UniqueIdentifier
+  createdAt           DateTime @default(now()) @db.DateTime2
+  updatedAt           DateTime? @db.DateTime2
+
+  @@map("SubscriptionRequests")
+}
+
+model VerificationDocument {
+  id              String    @id @default(uuid()) @db.UniqueIdentifier
+  requestId       String?   @db.UniqueIdentifier
+  tenantId        String?   @db.UniqueIdentifier
+  kind            String    @db.NVarChar(40)
+  licenseNumber   String    @db.NVarChar(100)
+  expiresOn       DateTime? @db.Date
+  status          String    @db.NVarChar(32)
+  fileName        String    @default("") @db.NVarChar(200)
+  content         String?   @db.NVarChar(Max)
+  verifiedBy      String?   @db.UniqueIdentifier
+  verifiedAt      DateTime? @db.DateTime2
+  rejectionReason String    @default("") @db.NVarChar(500)
+  createdAt       DateTime  @default(now()) @db.DateTime2
+
+  @@map("VerificationDocuments")
+}
+
+model Subscription {
+  id               String    @id @default(uuid()) @db.UniqueIdentifier
+  tenantId         String    @db.UniqueIdentifier
+  planCode         String    @db.NVarChar(32)
+  status           String    @db.NVarChar(32)
+  cycle            String    @db.NVarChar(16)
+  trialEndsAt      DateTime? @db.DateTime2
+  currentPeriodEnd DateTime? @db.DateTime2
+  createdAt        DateTime  @default(now()) @db.DateTime2
+
+  @@map("Subscriptions")
+}
+
+model SubscriptionInvoice {
+  id             String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId       String   @db.UniqueIdentifier
+  subscriptionId String?  @db.UniqueIdentifier
+  amount         Decimal  @db.Decimal(18, 2)
+  status         String   @db.NVarChar(32)
+  dueAt          DateTime @db.DateTime2
+  createdAt      DateTime @default(now()) @db.DateTime2
+
+  @@map("SubscriptionInvoices")
+}
+
+model PaymentProof {
+  id         String    @id @default(uuid()) @db.UniqueIdentifier
+  invoiceId  String    @db.UniqueIdentifier
+  method     String    @db.NVarChar(32)
+  status     String    @db.NVarChar(32)
+  fileName   String    @default("") @db.NVarChar(200)
+  note       String    @default("") @db.NVarChar(500)
+  reviewedBy String?   @db.UniqueIdentifier
+  reviewedAt DateTime? @db.DateTime2
+  createdAt  DateTime  @default(now()) @db.DateTime2
+
+  @@map("PaymentProofs")
+}
+
+model Partner {
+  id          String   @id @default(uuid()) @db.UniqueIdentifier
+  name        String   @db.NVarChar(200)
+  partnerType String   @db.NVarChar(40)
+  contactName String   @db.NVarChar(200)
+  phone       String   @db.NVarChar(20)
+  email       String   @db.NVarChar(320)
+  status      String   @db.NVarChar(32)
+  modules     String   @default("") @db.NVarChar(500)
+  notes       String   @default("") @db.NVarChar(1000)
+  tenantIds   String   @default("[]") @db.NVarChar(Max)
+  createdAt   DateTime @default(now()) @db.DateTime2
+  licenses    PartnerLicense[]
+
+  @@map("Partners")
+}
+
+model PartnerLicense {
+  id            String    @id @default(uuid()) @db.UniqueIdentifier
+  partnerId     String    @db.UniqueIdentifier
+  licenseNumber String    @db.NVarChar(100)
+  fileName      String    @default("") @db.NVarChar(200)
+  issuedOn      DateTime? @db.Date
+  expiresOn     DateTime  @db.Date
+  status        String    @db.NVarChar(32)
+  partner       Partner   @relation(fields: [partnerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@map("PartnerLicenses")
+}
+
+model GlobalCatalogItem {
+  id                   String   @id @default(uuid()) @db.UniqueIdentifier
+  code                 String   @unique @db.NVarChar(64)
+  itemType             String   @db.NVarChar(32)
+  nameAr               String   @db.NVarChar(200)
+  nameEn               String   @db.NVarChar(200)
+  genericName          String   @db.NVarChar(200)
+  strength             String   @default("") @db.NVarChar(80)
+  dosageForm           String   @default("") @db.NVarChar(80)
+  manufacturer         String   @default("") @db.NVarChar(200)
+  country              String   @default("") @db.NVarChar(80)
+  categoryName         String   @default("") @db.NVarChar(200)
+  atcCode              String   @default("") @db.NVarChar(16)
+  isControlled         Boolean  @default(false)
+  requiresPrescription Boolean  @default(false)
+  storageCondition     String   @default("") @db.NVarChar(200)
+  status               String   @db.NVarChar(32)
+  createdAt            DateTime @default(now()) @db.DateTime2
+  barcodes             GlobalCatalogBarcode[]
+  units                GlobalCatalogUnit[]
+
+  @@map("GlobalCatalogItems")
+}
+
+model GlobalCatalogBarcode {
+  id     String @id @default(uuid()) @db.UniqueIdentifier
+  itemId String @db.UniqueIdentifier
+  code   String @db.NVarChar(32)
+  item   GlobalCatalogItem @relation(fields: [itemId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@map("GlobalCatalogBarcodes")
+}
+
+model GlobalCatalogUnit {
+  id           String @id @default(uuid()) @db.UniqueIdentifier
+  itemId       String @db.UniqueIdentifier
+  unitName     String @db.NVarChar(40)
+  factorToBase Int
+  item         GlobalCatalogItem @relation(fields: [itemId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@map("GlobalCatalogUnits")
+}
+
+model NewCatalogItemRequest {
+  id           String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId     String   @db.UniqueIdentifier
+  branchId     String?  @db.UniqueIdentifier
+  requestedBy  String?  @db.UniqueIdentifier
+  nameAr       String   @db.NVarChar(200)
+  nameEn       String   @db.NVarChar(200)
+  genericName  String   @db.NVarChar(200)
+  barcode      String   @default("") @db.NVarChar(32)
+  note         String   @default("") @db.NVarChar(500)
+  status       String   @db.NVarChar(32)
+  decisionNote String   @default("") @db.NVarChar(500)
+  mergedItemId String?  @db.UniqueIdentifier
+  createdAt    DateTime @default(now()) @db.DateTime2
+
+  @@map("NewCatalogItemRequests")
+}
+
+model PlatformAuditLog {
+  id         String   @id @default(uuid()) @db.UniqueIdentifier
+  actorId    String?  @db.UniqueIdentifier
+  action     String   @db.NVarChar(80)
+  entityType String   @db.NVarChar(80)
+  entityId   String   @db.NVarChar(64)
+  reason     String   @default("") @db.NVarChar(500)
+  details    String   @default("{}") @db.NVarChar(Max)
+  createdAt  DateTime @default(now()) @db.DateTime2
+
+  @@map("PlatformAuditLogs")
+}
+
+model ImpersonationGrant {
+  id        String    @id @default(uuid()) @db.UniqueIdentifier
+  codeHash  String    @db.NVarChar(128)
+  tenantId  String    @db.UniqueIdentifier
+  userId    String    @db.UniqueIdentifier
+  reason    String    @db.NVarChar(500)
+  expiresAt DateTime  @db.DateTime2
+  usedAt    DateTime? @db.DateTime2
+  createdAt DateTime  @default(now()) @db.DateTime2
+
+  @@map("ImpersonationGrants")
+}
+
+model TenantAdminInvite {
+  id          String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId    String   @db.UniqueIdentifier
+  email       String   @db.NVarChar(320)
+  displayName String   @db.NVarChar(200)
+  status      String   @db.NVarChar(32)
+  createdAt   DateTime @default(now()) @db.DateTime2
+
+  @@map("TenantAdminInvites")
+}
