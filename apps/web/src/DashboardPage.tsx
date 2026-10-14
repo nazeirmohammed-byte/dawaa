@@ -123,7 +123,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const herePath = `${location.pathname}${location.search}`;
   const currentGroup =
     groups.find((group) => group.items.some(([to, end]) => (end ? location.pathname === to : herePath === to)))?.id ?? 'sell';
-  const [openGroup, setOpenGroup] = useState(currentGroup);
+  const [openGroup, setOpenGroup] = useState<typeof currentGroup | ''>(currentGroup);
   useEffect(() => {
     setOpenGroup(currentGroup);
   }, [currentGroup]);
