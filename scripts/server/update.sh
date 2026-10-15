@@ -25,7 +25,7 @@ MIG_USER=$(sed -n 's/.*user=\([^;]*\).*/\1/p' <<<"$MIG_URL")
 MIG_PASS=$(sed -n 's/.*password=\([^;]*\).*/\1/p' <<<"$MIG_URL")
 API_PORT=$(envval API_PORT); API_PORT=${API_PORT:-4190}
 
-sql() { sqlcmd -S localhost -U "$MIG_USER" -P "$MIG_PASS" -C -b -d dawaa "$@"; }
+sql() { sqlcmd -S localhost -U "$MIG_USER" -P "$MIG_PASS" -C -b -I -d dawaa "$@"; }
 
 pull() {
   step "Pull from GitHub"
