@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
-import { api, type Board, type BoardCard, type Profile } from './api';
+import { api, type BoardCard, type Profile } from './api';
+import { HelpTip } from '../../admin/src/hint';
 import { HomeDash } from './HomeDash';
-import { textOf, useUi } from './ui';
+import { useUi } from './ui';
 
 export function Shell({ children }: { children: React.ReactNode }) {
   const { t } = useTranslation();
@@ -14,15 +15,24 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const [query, setQuery] = useState('');
   const [online, setOnline] = useState(true);
   const [alertCount, setAlertCount] = useState(0);
+  const [bellOpen, setBellOpen] = useState(false);
+  const [bellItems, setBellItems] = useState<{ id: string; severity: string; titleAr: string; titleEn: string }[]>([]);
   const [scopeKey, setScopeKey] = useState(localStorage.getItem('dawaa.branch') ?? '');
 
   useEffect(() => {
     api<Profile>('/api/v1/auth/me')
       .then(setProfile)
       .catch(() => navigate('/'));
-    api<Board>('/api/v1/dashboard')
-      .then((board) => setAlertCount(unseen(board.alerts).length))
-      .catch(() => setAlertCount(0));
+    const loadBell = () => {
+      api<{ unread: number; items: { id: string; severity: string; titleAr: string; titleEn: string }[] }>('/api/v1/alerts?view=bell')
+        .then((bell) => {
+          setAlertCount(bell.unread);
+          setBellItems(bell.items);
+        })
+        .catch(() => setAlertCount(0));
+    };
+    loadBell();
+    const bellTimer = window.setInterval(loadBell, 60000);
     const timer = window.setInterval(() => {
       api<{ status: string }>('/api/v1/health')
         .then((health) => setOnline(health.status !== 'error'))
@@ -31,8 +41,11 @@ export function Shell({ children }: { children: React.ReactNode }) {
     api<{ status: string }>('/api/v1/health')
       .then((health) => setOnline(health.status !== 'error'))
       .catch(() => setOnline(false));
-    return () => window.clearInterval(timer);
-  }, [navigate]);
+    return () => {
+      window.clearInterval(timer);
+      window.clearInterval(bellTimer);
+    };
+  }, [navigate, scopeKey]);
 
   async function logout() {
     await api('/api/v1/auth/logout', { method: 'POST' }).catch(() => undefined);
@@ -45,7 +58,11 @@ export function Shell({ children }: { children: React.ReactNode }) {
     : profile?.tenant.tradeNameEn || profile?.tenant.tradeNameAr;
   const roleName = ui.language.startsWith('ar') ? profile?.role?.nameAr : profile?.role?.nameEn || profile?.role?.nameAr;
   const pageTitle =
-    (
+    location.pathname === '/app/users' && location.search.includes('roles=1')
+      ? t('permissions')
+      : location.pathname === '/app/purchasing' && location.search.includes('suppliers=1')
+        ? t('suppliers')
+      : (
       {
         '/app': t('control'),
         '/app/pos': t('quickPos'),
@@ -57,13 +74,32 @@ export function Shell({ children }: { children: React.ReactNode }) {
         '/app/users': t('users'),
         '/app/settings': t('settings'),
         '/app/prices': t('prices'),
-        '/app/alerts': t('expiryAlerts'),
+        '/app/alerts': t('alerts'),
         '/app/receipt': t('receipt'),
         '/app/customers': t('customers'),
         '/app/prescriptions': t('prescriptions'),
         '/app/branches': t('branches'),
       } as Record<string, string>
     )[location.pathname] ?? t('control');
+  const pageHint =
+    (
+      {
+        '/app': t('hintHome'),
+        '/app/pos': t('hintPos'),
+        '/app/sales': t('hintSales'),
+        '/app/inventory': t('hintInventory'),
+        '/app/purchasing': location.search.includes('suppliers=1') ? t('hintSuppliers') : t('hintPurchasing'),
+        '/app/finance': t('hintFinance'),
+        '/app/reports': t('hintReports'),
+        '/app/users': location.search.includes('roles=1') ? t('hintRoles') : t('hintUsers'),
+        '/app/settings': t('hintSettings'),
+        '/app/prices': t('hintPrices'),
+        '/app/alerts': t('hintAlerts'),
+        '/app/customers': t('hintCustomers'),
+        '/app/prescriptions': t('hintPrescriptions'),
+        '/app/branches': t('hintBranches'),
+      } as Record<string, string>
+    )[location.pathname] ?? '';
   const selectedBranch = scopeKey || profile?.branch?.id || '';
   const selected = profile?.network.branches.find((branch) => branch.id === selectedBranch);
   const branchName =
@@ -78,52 +114,68 @@ export function Shell({ children }: { children: React.ReactNode }) {
     setScopeKey(value);
   }
 
-  const groups = [
+  const perms = profile?.permissions ?? [];
+  const canAlerts = ['stock.count', 'purchasing.receive', 'accounting.view', 'reports.view', 'users.manage'].some((code) => perms.includes(code));
+  const allow = (need: string) => need === 'alerts.any' ? perms.length === 0 || canAlerts : perms.length === 0 || perms.includes(need);
+  type NavItem = [string, boolean, string, string];
+  const groups = ([
     {
       id: 'sell',
       label: 'groupSell',
       items: [
-        ['/app/pos', false, 'quickPos'],
-        ['/app/sales', false, 'sales'],
-        ['/app/customers', false, 'customers'],
-        ['/app/prescriptions', false, 'prescriptions'],
-        ['/app/receipt', false, 'receipt'],
+        ['/app/pos', false, 'quickPos', 'pos.sell'],
+        ['/app/sales', false, 'sales', 'pos.sell'],
       ],
     },
     {
       id: 'stock',
       label: 'groupStock',
       items: [
-        ['/app/inventory', false, 'inventory'],
-        ['/app/alerts', false, 'expiryAlerts'],
-        ['/app/purchasing', false, 'procurement'],
-        ['/app/purchasing?suppliers=1', false, 'suppliers'],
+        ['/app/inventory', false, 'medicines', 'stock.count'],
+        ['/app/alerts', false, 'alerts', 'alerts.any'],
+        ['/app/prices', false, 'prices', 'dashboard.view'],
+      ],
+    },
+    {
+      id: 'buy',
+      label: 'groupBuy',
+      items: [
+        ['/app/purchasing', false, 'procurement', 'purchasing.receive'],
+        ['/app/purchasing?suppliers=1', false, 'suppliers', 'purchasing.receive'],
+      ],
+    },
+    {
+      id: 'people',
+      label: 'groupPeople',
+      items: [
+        ['/app/customers', false, 'customers', 'pos.sell'],
+        ['/app/prescriptions', false, 'prescriptions', 'controlled.dispense'],
       ],
     },
     {
       id: 'money',
       label: 'groupMoney',
       items: [
-        ['/app/prices', false, 'prices'],
-        ['/app/finance', false, 'accounts'],
-        ['/app/reports', false, 'reports'],
+        ['/app/finance', false, 'accounts', 'accounting.view'],
+        ['/app/reports', false, 'reports', 'reports.view'],
       ],
     },
     {
       id: 'setup',
       label: 'groupSetup',
       items: [
-        ['/app/branches', false, 'branches'],
-        ['/app/users', false, 'users'],
-        ['/app/users?roles=1', false, 'permissions'],
-        ['/app/settings', false, 'settings'],
+        ['/app/branches', false, 'branches', 'users.manage'],
+        ['/app/users', false, 'users', 'users.manage'],
+        ['/app/users?roles=1', false, 'permissions', 'users.manage'],
+        ['/app/settings', false, 'settings', 'dashboard.view'],
       ],
     },
-  ] as const;
+  ] as { id: string; label: string; items: NavItem[] }[]).map((group) => ({ ...group, items: group.items.filter((item) => allow(item[3])) })).filter((group) => group.items.length > 0);
   const herePath = `${location.pathname}${location.search}`;
   const currentGroup =
     groups.find((group) => group.items.some(([to, end]) => (end ? location.pathname === to : herePath === to)))?.id ?? 'sell';
-  const [openGroup, setOpenGroup] = useState<typeof currentGroup | ''>(currentGroup);
+  const [openGroup, setOpenGroup] = useState<string>(currentGroup);
+  const [accountOpen, setAccountOpen] = useState(false);
   useEffect(() => {
     setOpenGroup(currentGroup);
   }, [currentGroup]);
@@ -147,6 +199,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
               <button type="button" aria-expanded={openGroup === group.id} onClick={() => setOpenGroup(openGroup === group.id ? '' : group.id)}>
                 <span className="nav-swatch" aria-hidden="true" />
                 <span className="nav-label">{t(group.label)}</span>
+                <span className={`nav-caret${openGroup === group.id ? ' open' : ''}`} aria-hidden="true" />
               </button>
               {openGroup === group.id
                 ? group.items.map(([to, end, key]) => {
@@ -184,7 +237,10 @@ export function Shell({ children }: { children: React.ReactNode }) {
       ) : null}
       <header className="topbar">
         <div className="top-title">
-          <h1>{pageTitle}</h1>
+          <h1>
+            {pageTitle}
+            {pageHint ? <HelpTip text={pageHint} /> : null}
+          </h1>
           <p>{t('welcomeLine', { name: profile?.user.displayName ?? '' })}</p>
           {profile && profile.network.branches.length > 0 ? (
             <select className="branch-switch" value={selectedBranch} onChange={(event) => chooseBranch(event.target.value)}>
@@ -216,6 +272,26 @@ export function Shell({ children }: { children: React.ReactNode }) {
             </svg>
             <span>{t('country')}</span>
           </span>
+          <button
+            type="button"
+            className={ui.touch ? 'tool-btn on' : 'tool-btn'}
+            title={ui.touch ? t('touchOff') : t('touchOn')}
+            onClick={() => {
+              ui.toggleTouch();
+              ui.push({
+                tone: 'info',
+                title: ui.touch ? t('deskTitle') : t('touchTitle'),
+                body: ui.touch ? t('deskBody') : t('touchBody'),
+              });
+            }}
+          >
+            <svg className="tool-ico" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M9 11V5.5a1.5 1.5 0 0 1 3 0V11" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+              <path d="M12 10.5V4.2a1.5 1.5 0 0 1 3 0V12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+              <path d="M15 11.2V6.4a1.5 1.5 0 0 1 3 0V14c0 4-2.2 6.5-6.2 6.5-3.2 0-5.3-1.6-6.4-3.6L4 14.2a1.6 1.6 0 0 1 2.6-1.8L9 14.2" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            <span>{ui.touch ? t('touchOff') : t('touchOn')}</span>
+          </button>
           <button type="button" className="tool-btn" onClick={ui.toggleLanguage} title={t('language')}>
             <svg className="tool-ico" viewBox="0 0 24 24" aria-hidden="true">
               <circle cx="12" cy="12" r="8.25" fill="none" stroke="currentColor" strokeWidth="1.8" />
@@ -232,7 +308,8 @@ export function Shell({ children }: { children: React.ReactNode }) {
             </svg>
             <span>{t('settings')}</span>
           </button>
-          <button type="button" className="tool-btn" onClick={() => navigate('/app/alerts')} title={t('alerts')}>
+          <div className="user-menu">
+          <button type="button" className="tool-btn" onClick={() => setBellOpen((open) => !open)} title={t('alerts')}>
             <svg className="tool-ico" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M6.5 16.5h11l-1.2-1.6a3 3 0 0 1-.6-1.8V10a3.7 3.7 0 0 0-7.4 0v3.1c0 .7-.2 1.3-.6 1.8L6.5 16.5z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
               <path d="M10 16.5a2 2 0 0 0 4 0" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
@@ -240,17 +317,45 @@ export function Shell({ children }: { children: React.ReactNode }) {
             <span>{t('alerts')}</span>
             {alertCount > 0 ? <span className="count">{alertCount}</span> : null}
           </button>
-          <div className="who" title={profile?.user.displayName}>
-            <span className="avatar" aria-hidden="true">
-              <svg viewBox="0 0 24 24" width="22" height="22">
-                <circle cx="12" cy="8" r="3.2" fill="currentColor" />
-                <path d="M5.5 19.2c1.2-3 3.5-4.4 6.5-4.4s5.3 1.4 6.5 4.4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-              </svg>
-            </span>
-            <span>
-              <strong>{profile?.user.displayName}</strong>
-              <span>{roleName || branchName}</span>
-            </span>
+          {bellOpen ? (
+            <div className="user-pop bell-pop">
+              {bellItems.length === 0 ? <span>{t('alertEmpty')}</span> : bellItems.slice(0, 6).map((item) => (
+                <Link key={item.id} to={`/app/alerts?id=${item.id}`} onClick={() => setBellOpen(false)}>
+                  {ui.language.startsWith('ar') ? item.titleAr : item.titleEn}
+                </Link>
+              ))}
+              <Link to="/app/alerts" onClick={() => setBellOpen(false)}>{t('viewAll')}</Link>
+            </div>
+          ) : null}
+          </div>
+          <div className="user-menu">
+            <button type="button" className="who" title={profile?.user.displayName} onClick={() => setAccountOpen((open) => !open)}>
+              <span className="avatar" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="22" height="22">
+                  <circle cx="12" cy="8" r="3.2" fill="currentColor" />
+                  <path d="M5.5 19.2c1.2-3 3.5-4.4 6.5-4.4s5.3 1.4 6.5 4.4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                </svg>
+              </span>
+              <span>
+                <strong>{profile?.user.displayName}</strong>
+                <span>{roleName || branchName}</span>
+              </span>
+            </button>
+            {accountOpen ? (
+              <div className="user-pop">
+                <strong>{profile?.user.displayName}</strong>
+                <span>{roleName}</span>
+                <span>{name}</span>
+                <span>{branchName}</span>
+                <Link to="/app/account" onClick={() => setAccountOpen(false)}>{t('myAccount')}</Link>
+                <Link to="/app/settings" onClick={() => setAccountOpen(false)}>{t('accountDetails')}</Link>
+                <Link to="/app/account#password" onClick={() => setAccountOpen(false)}>{t('changePassword')}</Link>
+                {(profile?.permissions ?? []).includes('users.manage') ? (
+                  <Link to="/app/settings" onClick={() => setAccountOpen(false)}>{t('subscription')}</Link>
+                ) : null}
+                <button type="button" onClick={logout}>{t('logout')}</button>
+              </div>
+            ) : null}
           </div>
           <span className={online ? 'chip' : 'chip warn'} title={online ? t('online') : t('offline')}>
             <i className="status-dot" />
@@ -265,10 +370,10 @@ export function Shell({ children }: { children: React.ReactNode }) {
       {ui.touch ? (
         <nav className="thumb">
           <NavLink to="/app" end>
-            {t('home')}
+            {t('control')}
           </NavLink>
           <NavLink to="/app/pos">{t('quickPos')}</NavLink>
-          <NavLink to="/app/receipt">{t('receipt')}</NavLink>
+          <NavLink to="/app/sales">{t('sales')}</NavLink>
         </nav>
       ) : null}
     </div>
@@ -290,47 +395,49 @@ export function DashboardPage() {
   return <HomeDash />;
 }
 
-export function AlertsPage() {
+export function AccountPage() {
   const { t } = useTranslation();
-  const ui = useUi();
-  const [alerts, setAlerts] = useState<BoardCard[]>([]);
-
-  function reload() {
-    api<Board>('/api/v1/dashboard')
-      .then((board) => setAlerts(board.alerts))
-      .catch(() => setAlerts([]));
-  }
-
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [nextPassword, setNextPassword] = useState('');
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
   useEffect(() => {
-    reload();
+    api<Profile>('/api/v1/auth/me').then(setProfile).catch(() => setProfile(null));
   }, []);
-
   return (
     <section className="stack">
-      <h2 style={{ margin: 0 }}>{t('alerts')}</h2>
-      {alerts.length === 0 ? <p>{t('empty')}</p> : null}
-      {alerts.map((card) => {
-        const copy = textOf(card, ui.language);
-        return (
-          <article className={`signal ${card.severity}`} key={card.id}>
-            <h3>{copy.title}</h3>
-            <p>{copy.detail}</p>
-            <b>{copy.figure}</b>
-            <button
-              className="brass"
-              type="button"
-              style={{ marginTop: 10 }}
-              onClick={() => {
-                markSeen(card.id);
-                ui.push({ tone: card.severity === 'urgent' ? 'urgent' : 'watch', title: copy.title, body: copy.figure });
-                reload();
-              }}
-            >
-              {t('seen')}
-            </button>
-          </article>
-        );
-      })}
+      <h2 style={{ margin: 0 }}>{t('myAccount')}</h2>
+      <article className="panel-card">
+        <p><b>{profile?.user.displayName}</b></p>
+        <p>{profile?.role?.nameAr} / {profile?.role?.nameEn}</p>
+        <p>{profile?.tenant.tradeNameAr}</p>
+        <p dir="ltr">{profile?.user.phone} · {profile?.tenant.accountCode}</p>
+      </article>
+      <form
+        id="password"
+        className="panel-card"
+        onSubmit={(event) => {
+          event.preventDefault();
+          setError('');
+          setMessage('');
+          api('/api/v1/auth/password', {
+            method: 'POST',
+            body: JSON.stringify({ currentPassword, nextPassword }),
+          })
+            .then(() => setMessage(t('save')))
+            .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : t('empty')));
+        }}
+      >
+        <h3>{t('changePassword')}</h3>
+        <label className="field">{t('currentPassword')}<input type="password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} /></label>
+        <label className="field">{t('nextPassword')}<input type="password" value={nextPassword} onChange={(event) => setNextPassword(event.target.value)} /></label>
+        {error ? <p className="error">{error}</p> : null}
+        {message ? <p>{message}</p> : null}
+        <button className="primary" type="submit">{t('save')}</button>
+      </form>
     </section>
   );
 }
+
+export { AlertsPage } from './AlertsCenter';

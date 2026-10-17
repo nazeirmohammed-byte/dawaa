@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { missingSudanSuppliers } from '@dawaa/shared';
 import type { Prisma, PrismaClient } from './generated/client';
 import { STANDARD_MEDICINES } from './standard-medicines';
 
@@ -255,6 +256,26 @@ export async function ensureBranchNetwork(tx: Tx, tenantId: string): Promise<voi
       note: 'من الفرع الرئيسي',
       refType: 'TRANSFER',
     },
+  });
+}
+
+export async function ensureSudanSuppliers(tx: Tx, tenantId: string): Promise<void> {
+  const existing = await tx.supplier.findMany({
+    where: { tenantId, isDeleted: false },
+    select: { nameEn: true },
+  });
+  const missing = missingSudanSuppliers(existing.map((row) => row.nameEn));
+  if (missing.length === 0) return;
+  await tx.supplier.createMany({
+    data: missing.map((supplier) => ({
+      id: randomUUID(),
+      tenantId,
+      nameAr: supplier.nameAr,
+      nameEn: supplier.nameEn,
+      phone: supplier.phone,
+      city: supplier.city,
+      balance: '0.00',
+    })),
   });
 }
 
@@ -531,20 +552,181 @@ async function postSampleSale(
   }
 }
 
+export async function ensureDemoCatalog(tx: Tx, tenantId: string, branchId: string): Promise<void> {
+  const marker = await tx.product.findFirst({ where: { tenantId, sku: 'DEMO-001' } });
+  if (marker) return;
+  let category = await tx.category.findFirst({ where: { tenantId, isDeleted: false } });
+  if (!category) {
+    category = await tx.category.create({ data: { tenantId, nameAr: 'تجريبي', nameEn: 'Demonstration' } });
+  }
+  const names = [
+    ['باراسيتامول', 'Paracetamol'],
+    ['أموكسيسيلين', 'Amoxicillin'],
+    ['أوميبرازول', 'Omeprazole'],
+    ['ميتفورمين', 'Metformin'],
+    ['أملوديبين', 'Amlodipine'],
+    ['أتورفاستاتين', 'Atorvastatin'],
+    ['سيتريزين', 'Cetirizine'],
+    ['أزيثرومايسين', 'Azithromycin'],
+    ['لوسارتان', 'Losartan'],
+    ['فيتامين د', 'Vitamin D'],
+  ] as const;
+  for (let index = 1; index <= 46; index += 1) {
+    const pair = names[index % names.length] ?? names[0];
+    const sku = `DEMO-${String(index).padStart(3, '0')}`;
+    const productId = randomUUID();
+    const lotId = randomUUID();
+    const qty = 8 + (index % 30);
+    const expiryDays = index % 7 === 0 ? -5 : index % 5 === 0 ? 20 : 120 + index;
+    await tx.product.create({
+      data: {
+        id: productId,
+        tenantId,
+        categoryId: category.id,
+        sku,
+        nameAr: `${pair[0]} تجريبي ${index}`,
+        nameEn: `${pair[1]} demo ${index}`,
+        genericName: pair[1],
+        form: index % 2 === 0 ? 'قرص' : 'شراب',
+        strength: `${250 + index} mg`,
+        reorderLevel: 12,
+        sellPrice: (1500 + index * 25).toFixed(2),
+        costPrice: (900 + index * 15).toFixed(2),
+        gtin: `629${String(100000000 + index)}`,
+      },
+    });
+    await tx.stockLot.create({
+      data: {
+        id: lotId,
+        tenantId,
+        branchId,
+        productId,
+        batchNo: `B-${sku}`,
+        expiry: daysFromNow(expiryDays),
+        qtyBase: qty,
+        location: index % 4 === 0 ? 'ثلاجة' : 'رف تجريبي',
+      },
+    });
+    await tx.stockMovement.create({
+      data: {
+        tenantId,
+        branchId,
+        productId,
+        lotId,
+        type: 'RECEIVE',
+        qtyBase: qty,
+        note: 'رصيد توضيحي',
+        refType: 'DEMO',
+      },
+    });
+  }
+  const supplierCount = await tx.supplier.count({ where: { tenantId, isDeleted: false } });
+  for (let index = supplierCount; index < 5; index += 1) {
+    await tx.supplier.create({
+      data: {
+        tenantId,
+        nameAr: `مورد تجريبي ${index + 1}`,
+        nameEn: `Demo supplier ${index + 1}`,
+        phone: `09120000${index}`,
+        city: 'الخرطوم',
+        balance: '0.00',
+      },
+    });
+  }
+  const customerCount = await tx.customer.count({ where: { tenantId, isDeleted: false } });
+  for (let index = customerCount; index < 20; index += 1) {
+    await tx.customer.create({
+      data: {
+        tenantId,
+        nameAr: `عميل تجريبي ${index + 1}`,
+        nameEn: `Demo customer ${index + 1}`,
+        phone: `09220000${index}`,
+        balance: index % 4 === 0 ? '1500.00' : '0.00',
+      },
+    });
+  }
+  const sample = await tx.product.findFirst({ where: { tenantId, sku: 'DEMO-001' } });
+  const lot = sample ? await tx.stockLot.findFirst({ where: { tenantId, productId: sample.id, branchId } }) : null;
+  if (sample && lot && lot.qtyBase > 12) {
+    for (let day = 1; day <= 12; day += 1) {
+      const docNo = `DEMO-S-${day}`;
+      const existingSale = await tx.sale.findFirst({ where: { tenantId, docNo } });
+      if (existingSale) continue;
+      const saleId = randomUUID();
+      const soldAt = new Date(Date.now() - day * 24 * 60 * 60 * 1000);
+      await tx.sale.create({
+        data: {
+          id: saleId,
+          tenantId,
+          branchId,
+          docNo,
+          customerName: `عميل تجريبي ${day}`,
+          cashierName: 'كاشير النيل',
+          soldAt,
+          subtotal: '1500.00',
+          discount: '0.00',
+          total: '1500.00',
+          paid: '1500.00',
+          changeDue: '0.00',
+          paymentMethod: day % 2 === 0 ? 'CASH' : 'BANKAK',
+          status: 'POSTED',
+        },
+      });
+      await tx.saleLine.create({
+        data: {
+          tenantId,
+          saleId,
+          productId: sample.id,
+          nameAr: sample.nameAr,
+          nameEn: sample.nameEn,
+          qty: 1,
+          unitPrice: '1500.00',
+          lineTotal: '1500.00',
+          costTotal: '900.00',
+        },
+      });
+      await tx.stockLot.update({ where: { id: lot.id }, data: { qtyBase: { decrement: 1 } } });
+      await tx.stockMovement.create({
+        data: {
+          tenantId,
+          branchId,
+          productId: sample.id,
+          lotId: lot.id,
+          type: 'SALE',
+          qtyBase: -1,
+          note: docNo,
+          refType: 'SALE',
+          refId: saleId,
+        },
+      });
+    }
+  }
+  const current = await tx.pharmacySetting.findFirst({ where: { tenantId, key: 'demo' } });
+  if (!current) {
+    await tx.pharmacySetting.create({ data: { tenantId, key: 'demo', valueAr: 'بيانات توضيحية', valueEn: 'Demonstration data' } });
+  }
+}
+
 async function addStaff(tx: Tx, tenantId: string, branchId: string, passwordHash: string): Promise<void> {
   const staff = [
-    { email: 'cashier@demo.dawaa.local', name: 'كاشير النيل', role: 'CASHIER' },
-    { email: 'accountant@demo.dawaa.local', name: 'محاسب النيل', role: 'ACCOUNTANT' },
+    { email: 'cashier@demo.dawaa.local', name: 'كاشير النيل', role: 'CASHIER', phone: '0912000001' },
+    { email: 'accountant@demo.dawaa.local', name: 'محاسب النيل', role: 'ACCOUNTANT', phone: '0912000002' },
   ];
   for (const person of staff) {
     const role = await tx.role.findFirst({ where: { tenantId, code: person.role } });
     if (!role) throw new Error(`Missing role ${person.role}`);
+    const found = await tx.user.findFirst({ where: { tenantId, email: person.email, isDeleted: false } });
+    if (found) {
+      await tx.user.update({ where: { id: found.id }, data: { phone: person.phone, passwordHash, isActive: true } });
+      continue;
+    }
     const userId = randomUUID();
     await tx.user.create({
       data: {
         id: userId,
         tenantId,
         email: person.email,
+        phone: person.phone,
         passwordHash,
         displayName: person.name,
         isActive: true,

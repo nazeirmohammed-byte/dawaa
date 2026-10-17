@@ -4,7 +4,7 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import { randomUUID } from 'node:crypto';
-import type { NextFunction, Request, Response } from 'express';
+import { json, urlencoded, type NextFunction, type Request, type Response } from 'express';
 import { AppModule } from './app.module';
 import { loadConfig, loadDotEnv } from './config';
 import { requestContext, type RequestStore } from './context';
@@ -15,7 +15,9 @@ async function bootstrap(): Promise<void> {
   loadDotEnv();
   const config = loadConfig();
   logger.level = config.logLevel;
-  const app = await NestFactory.create(AppModule.register(config));
+  const app = await NestFactory.create(AppModule.register(config), { bodyParser: false });
+  app.use(json({ limit: '4mb' }));
+  app.use(urlencoded({ extended: true, limit: '4mb' }));
   app.use(helmet());
   app.use(cookieParser());
   app.use((req: Request, res: Response, next: NextFunction) => {

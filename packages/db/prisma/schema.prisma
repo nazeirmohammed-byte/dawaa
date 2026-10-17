@@ -13,6 +13,7 @@ datasource db {
 
 model Tenant {
   id            String    @id @default(uuid()) @db.UniqueIdentifier
+  accountCode   String    @unique @db.NVarChar(32)
   type          String    @db.NVarChar(32)
   dbMode        String    @default("SHARED") @db.NVarChar(32)
   status        String    @default("TRIAL") @db.NVarChar(32)
@@ -27,6 +28,8 @@ model Tenant {
   verificationStatus  String    @default("VALID") @db.NVarChar(16)
   ownerName           String    @default("") @db.NVarChar(200)
   addressLine         String    @default("") @db.NVarChar(300)
+  latitude            Decimal?  @db.Decimal(9, 6)
+  longitude           Decimal?  @db.Decimal(9, 6)
   pharmacistName      String    @default("") @db.NVarChar(200)
   pharmacistLicense   String    @default("") @db.NVarChar(100)
   readOnly            Boolean   @default(false)
@@ -55,6 +58,11 @@ model Tenant {
   suppliers          Supplier[]
   purchaseOrders     PurchaseOrder[]
   purchaseLines      PurchaseLine[]
+  goodsReceipts      GoodsReceipt[]
+  goodsReceiptLines  GoodsReceiptLine[]
+  inventoryEntries   InventoryEntry[]
+  inventoryEntryLines InventoryEntryLine[]
+  storageLocations   StorageLocation[]
   customers          Customer[]
   sales              Sale[]
   saleLines          SaleLine[]
@@ -69,6 +77,10 @@ model Tenant {
   exchangeRates      ExchangeRate[]
   priceBatches       PriceListChangeBatch[]
   priceHistories     PriceHistory[]
+  alertCases         AlertCase[]
+  alertEvents        AlertEvent[]
+  alertNotices       AlertNotice[]
+  alertPreferences   AlertPreference[]
 
   @@map("Tenants")
 }
@@ -82,6 +94,9 @@ model Branch {
   isHeadOffice Boolean  @default(false)
   state        String?  @db.NVarChar(100)
   city         String?  @db.NVarChar(100)
+  addressLine  String   @default("") @db.NVarChar(300)
+  latitude     Decimal? @db.Decimal(9, 6)
+  longitude    Decimal? @db.Decimal(9, 6)
   phone        String?  @db.NVarChar(20)
   isDeleted    Boolean  @default(false)
   createdAt    DateTime @default(now()) @db.DateTime2
@@ -97,6 +112,9 @@ model Branch {
   stockLots       StockLot[]
   stockMovements  StockMovement[]
   purchaseOrders  PurchaseOrder[]
+  goodsReceipts   GoodsReceipt[]
+  inventoryEntries InventoryEntry[]
+  storageLocations StorageLocation[]
   sales             Sale[]
   expenses          Expense[]
   priceActivations  BranchPriceActivation[]
@@ -397,6 +415,7 @@ model Product {
   isLocal      Boolean  @default(true)
   trackSerial  Boolean  @default(false)
   masterCode   String?  @db.NVarChar(64)
+  globalItemId String?  @db.UniqueIdentifier
   gtin         String?  @db.NVarChar(32)
   shelfLifeMonths Int?
   isDeleted    Boolean  @default(false)
@@ -408,9 +427,11 @@ model Product {
 
   tenant        Tenant          @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   category      Category        @relation(fields: [tenantId, categoryId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  globalItem    GlobalCatalogItem? @relation(fields: [globalItemId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   lots          StockLot[]
   movements     StockMovement[]
   purchaseLines PurchaseLine[]
+  goodsReceiptLines GoodsReceiptLine[]
   saleLines     SaleLine[]
   prices        ProductPrice[]
   priceHistories PriceHistory[]
@@ -418,6 +439,7 @@ model Product {
   @@unique([tenantId, id])
   @@unique([tenantId, sku])
   @@index([tenantId])
+  @@index([tenantId, globalItemId])
   @@map("Products")
 }
 
@@ -426,7 +448,7 @@ model StockLot {
   tenantId   String   @db.UniqueIdentifier
   branchId   String   @db.UniqueIdentifier
   productId  String   @db.UniqueIdentifier
-  batchNo        String    @db.NVarChar(64)
+  batchNo        String    @default("N/A") @db.NVarChar(64)
   expiry         DateTime  @db.DateTime2
   manufacturedAt DateTime? @db.DateTime2
   serialNo       String?   @db.NVarChar(64)
@@ -434,6 +456,9 @@ model StockLot {
   bonusQty       Int       @default(0)
   qtyBase        Int
   location       String    @db.NVarChar(100)
+  condition      String    @default("AVAILABLE") @db.NVarChar(32)
+  unitCost       Decimal?  @db.Decimal(18, 2)
+  receiptLineId  String?   @db.UniqueIdentifier
   createdAt  DateTime @default(now()) @db.DateTime2
   createdBy  String?  @db.UniqueIdentifier
   updatedAt  DateTime @updatedAt @db.DateTime2
@@ -442,8 +467,9 @@ model StockLot {
 
   tenant     Tenant          @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   branch     Branch          @relation(fields: [tenantId, branchId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
-  product    Product         @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
-  movements  StockMovement[]
+  product     Product           @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  receiptLine GoodsReceiptLine? @relation(fields: [tenantId, receiptLineId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  movements   StockMovement[]
 
   @@unique([tenantId, id])
   @@index([tenantId, productId, expiry])
@@ -483,9 +509,10 @@ model Supplier {
   nameAr    String   @db.NVarChar(200)
   nameEn    String   @db.NVarChar(200)
   phone     String?  @db.NVarChar(20)
-  city      String?  @db.NVarChar(100)
-  balance   Decimal  @default(0) @db.Decimal(18, 2)
-  isDeleted Boolean  @default(false)
+  city       String?  @db.NVarChar(100)
+  batchNotes String   @default("") @db.NVarChar(400)
+  balance    Decimal  @default(0) @db.Decimal(18, 2)
+  isDeleted  Boolean  @default(false)
   createdAt DateTime @default(now()) @db.DateTime2
   createdBy String?  @db.UniqueIdentifier
   updatedAt DateTime @updatedAt @db.DateTime2
@@ -494,6 +521,7 @@ model Supplier {
 
   tenant   Tenant          @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   orders   PurchaseOrder[]
+  receipts GoodsReceipt[]
 
   @@unique([tenantId, id])
   @@index([tenantId])
@@ -507,6 +535,8 @@ model PurchaseOrder {
   supplierId String   @db.UniqueIdentifier
   docNo      String   @db.NVarChar(32)
   status     String   @db.NVarChar(32)
+  priority   String   @default("NORMAL") @db.NVarChar(16)
+  notes      String   @default("") @db.NVarChar(400)
   total      Decimal  @db.Decimal(18, 2)
   orderedAt  DateTime @db.DateTime2
   createdAt  DateTime @default(now()) @db.DateTime2
@@ -519,6 +549,7 @@ model PurchaseOrder {
   branch   Branch         @relation(fields: [tenantId, branchId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
   supplier Supplier       @relation(fields: [tenantId, supplierId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
   lines    PurchaseLine[]
+  receipts GoodsReceipt[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, docNo])
@@ -531,7 +562,8 @@ model PurchaseLine {
   tenantId   String   @db.UniqueIdentifier
   purchaseId String   @db.UniqueIdentifier
   productId  String   @db.UniqueIdentifier
-  qty        Int
+  qty          Int
+  receivedQty  Int      @default(0)
   unitCost   Decimal  @db.Decimal(18, 2)
   lineTotal  Decimal  @db.Decimal(18, 2)
   createdAt  DateTime @default(now()) @db.DateTime2
@@ -543,10 +575,162 @@ model PurchaseLine {
   tenant   Tenant        @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   purchase PurchaseOrder @relation(fields: [tenantId, purchaseId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
   product  Product       @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  receiptLines GoodsReceiptLine[]
 
   @@unique([tenantId, id])
   @@index([tenantId])
   @@map("PurchaseLines")
+}
+
+model GoodsReceipt {
+  id              String    @id @default(uuid()) @db.UniqueIdentifier
+  tenantId        String    @db.UniqueIdentifier
+  branchId        String    @db.UniqueIdentifier
+  supplierId      String?   @db.UniqueIdentifier
+  purchaseId      String?   @db.UniqueIdentifier
+  clientKey       String    @db.UniqueIdentifier
+  docNo           String    @db.NVarChar(32)
+  supplierInvoice String    @default("") @db.NVarChar(64)
+  currency        String    @default("SDG") @db.NVarChar(8)
+  exchangeRate    Decimal?  @db.Decimal(18, 4)
+  discountAmount  Decimal   @default(0) @db.Decimal(18, 2)
+  taxAmount       Decimal   @default(0) @db.Decimal(18, 2)
+  chargeAmount    Decimal   @default(0) @db.Decimal(18, 2)
+  status          String    @db.NVarChar(32)
+  source          String    @db.NVarChar(32)
+  receivedAt      DateTime  @db.DateTime2
+  postedAt        DateTime? @db.DateTime2
+  createdAt       DateTime  @default(now()) @db.DateTime2
+  createdBy       String?   @db.UniqueIdentifier
+  updatedAt       DateTime  @updatedAt @db.DateTime2
+  updatedBy       String?   @db.UniqueIdentifier
+  rowVersion      Unsupported("timestamp")?
+
+  tenant   Tenant             @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  branch   Branch             @relation(fields: [tenantId, branchId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  supplier Supplier?          @relation(fields: [tenantId, supplierId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  purchase PurchaseOrder?     @relation(fields: [tenantId, purchaseId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  lines    GoodsReceiptLine[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, docNo])
+  @@unique([tenantId, clientKey])
+  @@index([tenantId])
+  @@map("GoodsReceipts")
+}
+
+model GoodsReceiptLine {
+  id             String    @id @default(uuid()) @db.UniqueIdentifier
+  tenantId       String    @db.UniqueIdentifier
+  receiptId      String    @db.UniqueIdentifier
+  productId      String    @db.UniqueIdentifier
+  purchaseLineId String?   @db.UniqueIdentifier
+  batchNo        String    @default("N/A") @db.NVarChar(64)
+  qty            Int
+  bonusQty       Int       @default(0)
+  unitCost       Decimal   @db.Decimal(18, 2)
+  sellPrice      Decimal?  @db.Decimal(18, 2)
+  rejectedQty    Int       @default(0)
+  currency       String    @default("SDG") @db.NVarChar(8)
+  foreignUnitCost Decimal? @db.Decimal(18, 4)
+  exchangeRate   Decimal?  @db.Decimal(18, 4)
+  expiry         DateTime  @db.DateTime2
+  location       String    @db.NVarChar(100)
+  condition      String    @db.NVarChar(32)
+  manufacturedAt DateTime? @db.DateTime2
+  serialNo       String?   @db.NVarChar(64)
+  unitCode       String    @default("BASE") @db.NVarChar(32)
+  postedQty      Int       @default(0)
+  createdAt      DateTime  @default(now()) @db.DateTime2
+  createdBy      String?   @db.UniqueIdentifier
+  updatedAt      DateTime  @updatedAt @db.DateTime2
+  updatedBy      String?   @db.UniqueIdentifier
+  rowVersion     Unsupported("timestamp")?
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  receipt      GoodsReceipt  @relation(fields: [tenantId, receiptId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  product      Product       @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  purchaseLine PurchaseLine? @relation(fields: [tenantId, purchaseLineId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  lots         StockLot[]
+  inventoryLines InventoryEntryLine[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("GoodsReceiptLines")
+}
+
+/// Inventory receiving document. Distinct from the manufacturer batch stored on the goods receipt line.
+model InventoryEntry {
+  id         String    @id @default(uuid()) @db.UniqueIdentifier
+  tenantId   String    @db.UniqueIdentifier
+  branchId   String    @db.UniqueIdentifier
+  clientKey  String    @db.UniqueIdentifier
+  docNo      String    @db.NVarChar(32)
+  status     String    @db.NVarChar(32)
+  receivedAt DateTime  @db.DateTime2
+  postedAt   DateTime? @db.DateTime2
+  createdAt  DateTime  @default(now()) @db.DateTime2
+  createdBy  String?   @db.UniqueIdentifier
+  updatedAt  DateTime  @updatedAt @db.DateTime2
+  updatedBy  String?   @db.UniqueIdentifier
+  rowVersion Unsupported("timestamp")?
+
+  tenant Tenant               @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  branch Branch               @relation(fields: [tenantId, branchId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  lines  InventoryEntryLine[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, docNo])
+  @@unique([tenantId, clientKey])
+  @@index([tenantId])
+  @@map("InventoryEntries")
+}
+
+model InventoryEntryLine {
+  id            String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId      String   @db.UniqueIdentifier
+  entryId       String   @db.UniqueIdentifier
+  receiptLineId String   @db.UniqueIdentifier
+  qty           Int
+  location      String   @db.NVarChar(32)
+  createdAt     DateTime @default(now()) @db.DateTime2
+  createdBy     String?  @db.UniqueIdentifier
+  updatedAt     DateTime @updatedAt @db.DateTime2
+  updatedBy     String?  @db.UniqueIdentifier
+  rowVersion    Unsupported("timestamp")?
+
+  tenant      Tenant           @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  entry       InventoryEntry   @relation(fields: [tenantId, entryId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+  receiptLine GoodsReceiptLine @relation(fields: [tenantId, receiptLineId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, entryId, receiptLineId])
+  @@index([tenantId])
+  @@map("InventoryEntryLines")
+}
+
+model StorageLocation {
+  id        String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId  String   @db.UniqueIdentifier
+  branchId  String   @db.UniqueIdentifier
+  code      String   @db.NVarChar(32)
+  nameAr    String   @db.NVarChar(100)
+  nameEn    String   @db.NVarChar(100)
+  kind      String   @db.NVarChar(32)
+  isDeleted Boolean  @default(false)
+  createdAt DateTime @default(now()) @db.DateTime2
+  createdBy String?  @db.UniqueIdentifier
+  updatedAt DateTime @updatedAt @db.DateTime2
+  updatedBy String?  @db.UniqueIdentifier
+  rowVersion Unsupported("timestamp")?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  branch Branch @relation(fields: [tenantId, branchId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, branchId, code])
+  @@index([tenantId])
+  @@map("StorageLocations")
 }
 
 model Customer {
@@ -744,6 +928,105 @@ model PharmacySetting {
   @@map("PharmacySettings")
 }
 
+/// One open row per live condition. Resolving keeps the row so the history stays.
+model AlertCase {
+  id             String    @id @default(uuid()) @db.UniqueIdentifier
+  tenantId       String    @db.UniqueIdentifier
+  branchId       String?   @db.UniqueIdentifier
+  fingerprint    String    @db.NVarChar(200)
+  category       String    @db.NVarChar(32)
+  severity       String    @db.NVarChar(16)
+  code           String    @db.NVarChar(64)
+  status         String    @db.NVarChar(32)
+  titleAr        String    @db.NVarChar(200)
+  titleEn        String    @db.NVarChar(200)
+  detailAr       String    @db.NVarChar(800)
+  detailEn       String    @db.NVarChar(800)
+  figureAr       String    @db.NVarChar(80)
+  figureEn       String    @db.NVarChar(80)
+  currentValue   String    @db.NVarChar(80)
+  thresholdValue String    @db.NVarChar(80)
+  entityType     String    @db.NVarChar(32)
+  entityId       String    @db.NVarChar(80)
+  recommendedAr  String    @db.NVarChar(400)
+  recommendedEn  String    @db.NVarChar(400)
+  actionHref     String    @db.NVarChar(200)
+  estimate       Boolean   @default(false)
+  exposure       Decimal   @default(0) @db.Decimal(18, 2)
+  assigneeId     String?   @db.UniqueIdentifier
+  snoozeUntil    DateTime? @db.DateTime2
+  openedAt       DateTime  @db.DateTime2
+  resolvedAt     DateTime? @db.DateTime2
+  escalatedAt    DateTime? @db.DateTime2
+  createdAt      DateTime  @default(now()) @db.DateTime2
+  updatedAt      DateTime  @updatedAt @db.DateTime2
+  rowVersion     Unsupported("timestamp")?
+
+  tenant Tenant       @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  events AlertEvent[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, fingerprint])
+  @@index([tenantId, status])
+  @@map("AlertCases")
+}
+
+model AlertEvent {
+  id        String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId  String   @db.UniqueIdentifier
+  caseId    String   @db.UniqueIdentifier
+  kind      String   @db.NVarChar(32)
+  note      String   @db.NVarChar(400)
+  actorId   String?  @db.UniqueIdentifier
+  createdAt DateTime @default(now()) @db.DateTime2
+
+  tenant Tenant    @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  case   AlertCase @relation(fields: [tenantId, caseId], references: [tenantId, id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, caseId, createdAt])
+  @@map("AlertEvents")
+}
+
+model AlertNotice {
+  id          String    @id @default(uuid()) @db.UniqueIdentifier
+  tenantId    String    @db.UniqueIdentifier
+  userId      String    @db.UniqueIdentifier
+  fingerprint String    @db.NVarChar(200)
+  kind        String    @db.NVarChar(32)
+  periodKey   String    @db.NVarChar(32)
+  titleAr     String    @db.NVarChar(200)
+  titleEn     String    @db.NVarChar(200)
+  bodyAr      String    @db.NVarChar(400)
+  bodyEn      String    @db.NVarChar(400)
+  readAt      DateTime? @db.DateTime2
+  createdAt   DateTime  @default(now()) @db.DateTime2
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, userId, fingerprint, kind, periodKey])
+  @@index([tenantId, userId, readAt])
+  @@map("AlertNotices")
+}
+
+model AlertPreference {
+  id        String   @id @default(uuid()) @db.UniqueIdentifier
+  tenantId  String   @db.UniqueIdentifier
+  userId    String   @db.UniqueIdentifier
+  immediate Boolean  @default(true)
+  daily     Boolean  @default(true)
+  weekly    Boolean  @default(false)
+  createdAt DateTime @default(now()) @db.DateTime2
+  updatedAt DateTime @updatedAt @db.DateTime2
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, userId])
+  @@map("AlertPreferences")
+}
+
 /// Platform catalog. Not tenant-owned, so it is not under row-level security.
 model StandardMedicine {
   id           String @id @default(uuid()) @db.UniqueIdentifier
@@ -865,9 +1148,12 @@ model ProductPrice {
 model ExchangeRate {
   id        String   @id @default(uuid()) @db.UniqueIdentifier
   tenantId  String   @db.UniqueIdentifier
-  currency  String   @default("USD") @db.NVarChar(8)
-  rate      Decimal  @db.Decimal(18, 2)
-  notedAt   DateTime @db.DateTime2
+  currency    String   @default("USD") @db.NVarChar(8)
+  rate        Decimal  @db.Decimal(18, 4)
+  status      String   @default("APPROVED") @db.NVarChar(16)
+  reason      String   @default("") @db.NVarChar(400)
+  priceListId String?  @db.UniqueIdentifier
+  notedAt     DateTime @db.DateTime2
   createdAt DateTime @default(now()) @db.DateTime2
   createdBy String?  @db.UniqueIdentifier
   updatedAt DateTime @updatedAt @db.DateTime2
@@ -959,6 +1245,7 @@ model PlatformRolePermission {
 model PlatformUser {
   id           String    @id @default(uuid()) @db.UniqueIdentifier
   email        String    @unique @db.NVarChar(320)
+  phone        String?   @unique @db.NVarChar(20)
   displayName  String    @db.NVarChar(200)
   passwordHash String    @db.NVarChar(255)
   roleId       String    @db.UniqueIdentifier
@@ -1004,6 +1291,8 @@ model SubscriptionRequest {
   stateName           String   @db.NVarChar(100)
   city                String   @db.NVarChar(100)
   addressLine         String   @db.NVarChar(300)
+  latitude            Decimal? @db.Decimal(9, 6)
+  longitude           Decimal? @db.Decimal(9, 6)
   planCode            String   @db.NVarChar(32)
   branchCount         Int
   userCount           Int
@@ -1120,11 +1409,30 @@ model GlobalCatalogItem {
   isControlled         Boolean  @default(false)
   requiresPrescription Boolean  @default(false)
   storageCondition     String   @default("") @db.NVarChar(200)
+  descriptionEn        String   @default("") @db.NVarChar(1000)
+  descriptionAr        String   @default("") @db.NVarChar(1000)
+  brandNameEn          String   @default("") @db.NVarChar(200)
+  brandNameAr          String   @default("") @db.NVarChar(200)
+  packSize             String   @default("") @db.NVarChar(80)
+  packUnit             String   @default("") @db.NVarChar(40)
+  registrationNumber   String   @default("") @db.NVarChar(80)
+  modelNumber          String   @default("") @db.NVarChar(80)
+  regulatoryReference  String   @default("") @db.NVarChar(120)
+  versionNo            Int      @default(1)
   status               String   @db.NVarChar(32)
+  publishedAt          DateTime? @db.DateTime2
   createdAt            DateTime @default(now()) @db.DateTime2
+  updatedAt            DateTime @default(now()) @updatedAt @db.DateTime2
   barcodes             GlobalCatalogBarcode[]
   units                GlobalCatalogUnit[]
+  ingredients          GlobalProductIngredient[]
+  synonyms             GlobalMedicineSynonym[]
+  tokens               GlobalCatalogSearchToken[]
+  revisions            GlobalCatalogRevision[]
+  tenantProducts       Product[]
 
+  @@index([status, nameEn])
+  @@index([genericName])
   @@map("GlobalCatalogItems")
 }
 
@@ -1147,6 +1455,69 @@ model GlobalCatalogUnit {
   @@map("GlobalCatalogUnits")
 }
 
+/// Canonical generic ingredient. Commercial products link here, including combinations.
+model GlobalMedicineIngredient {
+  id         String   @id @default(uuid()) @db.UniqueIdentifier
+  innEn      String   @unique @db.NVarChar(200)
+  innAr      String   @default("") @db.NVarChar(200)
+  atcCode    String   @default("") @db.NVarChar(16)
+  createdAt  DateTime @default(now()) @db.DateTime2
+  synonyms   GlobalMedicineSynonym[]
+  products   GlobalProductIngredient[]
+
+  @@map("GlobalMedicineIngredients")
+}
+
+model GlobalMedicineSynonym {
+  id           String  @id @default(uuid()) @db.UniqueIdentifier
+  ingredientId String? @db.UniqueIdentifier
+  itemId       String? @db.UniqueIdentifier
+  alias        String  @db.NVarChar(200)
+  aliasKey     String  @db.NVarChar(80)
+  language     String  @default("en") @db.NVarChar(8)
+  verified     Boolean @default(true)
+  ingredient   GlobalMedicineIngredient? @relation(fields: [ingredientId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  item         GlobalCatalogItem?        @relation(fields: [itemId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([aliasKey])
+  @@map("GlobalMedicineSynonyms")
+}
+
+model GlobalProductIngredient {
+  id           String @id @default(uuid()) @db.UniqueIdentifier
+  itemId       String @db.UniqueIdentifier
+  ingredientId String @db.UniqueIdentifier
+  strengthText String @default("") @db.NVarChar(80)
+  item         GlobalCatalogItem       @relation(fields: [itemId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  ingredient   GlobalMedicineIngredient @relation(fields: [ingredientId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([itemId, ingredientId])
+  @@map("GlobalProductIngredients")
+}
+
+model GlobalCatalogSearchToken {
+  id     String @id @default(uuid()) @db.UniqueIdentifier
+  itemId String @db.UniqueIdentifier
+  token  String @db.NVarChar(80)
+  item   GlobalCatalogItem @relation(fields: [itemId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([token])
+  @@map("GlobalCatalogSearchTokens")
+}
+
+model GlobalCatalogRevision {
+  id        String   @id @default(uuid()) @db.UniqueIdentifier
+  itemId    String   @db.UniqueIdentifier
+  versionNo Int
+  snapshot  String   @db.NVarChar(Max)
+  actorId   String?  @db.UniqueIdentifier
+  createdAt DateTime @default(now()) @db.DateTime2
+  item      GlobalCatalogItem @relation(fields: [itemId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([itemId, versionNo])
+  @@map("GlobalCatalogRevisions")
+}
+
 model NewCatalogItemRequest {
   id           String   @id @default(uuid()) @db.UniqueIdentifier
   tenantId     String   @db.UniqueIdentifier
@@ -1155,6 +1526,11 @@ model NewCatalogItemRequest {
   nameAr       String   @db.NVarChar(200)
   nameEn       String   @db.NVarChar(200)
   genericName  String   @db.NVarChar(200)
+  manufacturer String   @default("") @db.NVarChar(200)
+  strength     String   @default("") @db.NVarChar(80)
+  packaging    String   @default("") @db.NVarChar(80)
+  itemKind     String   @default("BRAND") @db.NVarChar(16)
+  itemType     String   @default("Medicine") @db.NVarChar(32)
   barcode      String   @default("") @db.NVarChar(32)
   note         String   @default("") @db.NVarChar(500)
   status       String   @db.NVarChar(32)

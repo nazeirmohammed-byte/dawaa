@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { PrismaClient } from '@dawaa/db';
-import { addMoney, cmpMoney, money, MoneyError, mulMoney, subMoney } from '@dawaa/shared';
+import { addMoney, cmpMoney, isSystemSupplier, missingSudanSuppliers, money, MoneyError, mulMoney, ROLE_PERMISSIONS, subMoney, type RoleCode } from '@dawaa/shared';
+import { ALERT_STANDARD_VERSION, PREVIOUS_ALERT_DEFAULTS, assertAlertSetting, canConfigureAlerts, defaultAlertSettings } from '../board/alerts.logic';
 import { PasswordService } from '../auth/password.service';
 import { DomainError } from '../http/domain-error';
 import { PrismaService } from '../prisma/prisma.service';
+import { ensureTenantReference, findCommercialDuplicate, searchPublishedLibrary, type LibraryHit } from '../catalog/global-library';
 import { plainMedicineName } from './medicine-name';
-import { allocateFefo, assertJournalBalances, assertReceiptLine, balanceDelta, buildHome, khartoumDate, khartoumDayStart, nextPrice, parseCsv, priceListWorkflow, renewAmount, type PriceOp, type RenewAdjust } from './ops.logic';
+import { allocateFefo, allocateReceiptCosts, assertJournalBalances, assertReceiptLine, balanceDelta, buildHome, canStockReceipt, claimReceiptQty, claimStockQty, containerUnitPrice, inventoryDocNo, isSellableLot, khartoumDate, khartoumDayStart, manufacturerBatch, nextPrice, normalizePlace, orderStockState, parseCsv, parseItemPack, pieceUnitCost, piecesInContainer, placeCompatible, priceChangePct, priceListDateGate, priceListWorkflow, renewAmount, saleChoices, STOCK_PLACES, storageNeed, suggestPlace, summarizeStocking, usdSellingPrice, type ItemPack, type OrderBucket, type PriceOp, type RenewAdjust, type SaleUnit } from './ops.logic';
 
 type Tx = Parameters<Parameters<PrismaClient['$transaction']>[0]>[0];
 
@@ -16,42 +18,12 @@ function cash(value: MoneyRow | string): string {
   return money(typeof value === 'string' ? value : value.toFixed(2));
 }
 
-async function ensureProducts(tx: Tx, tenantId: string, actorId: string, codes: string[]): Promise<number> {
-  const standards = await tx.standardMedicine.findMany({ where: { code: { in: codes } } });
-  let created = 0;
-  for (const item of standards) {
-    const existing = await tx.product.findFirst({ where: { tenantId, sku: item.code, isDeleted: false } });
-    if (existing) continue;
-    let category = await tx.category.findFirst({ where: { tenantId, nameEn: item.categoryEn, isDeleted: false } });
-    if (!category) {
-      category = await tx.category.create({
-        data: { tenantId, nameAr: item.categoryAr, nameEn: item.categoryEn, createdBy: actorId },
-      });
-    }
-    await tx.product.create({
-      data: {
-        tenantId,
-        categoryId: category.id,
-        sku: item.code,
-        nameAr: plainMedicineName(item.nameAr),
-        nameEn: plainMedicineName(item.nameEn),
-        genericName: plainMedicineName(item.genericName),
-        form: item.form,
-        strength: item.strength,
-        reorderLevel: 10,
-        sellPrice: '0.00',
-        costPrice: '0.00',
-        isLocal: false,
-        masterCode: item.code,
-        gtin: item.gtin || null,
-        trackSerial: item.trackSerial,
-        isControlled: item.isControlled,
-        createdBy: actorId,
-      },
-    });
-    created += 1;
-  }
-  return created;
+function uniqueConflict(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && (error as { code?: string }).code === 'P2002';
+}
+
+function ensureProducts(tx: Tx, tenantId: string, actorId: string, codes: string[]): Promise<number> {
+  return ensureTenantReference(tx, tenantId, actorId, codes);
 }
 
 async function writePrices(
@@ -129,24 +101,34 @@ export type SaleInput = {
   discount: string;
   paid: string;
   paymentMethod: string;
-  lines: { productId: string; qty: number }[];
+  lines: { productId: string; qty: number; unit?: SaleUnit }[];
+};
+
+const UNIT_AR: Record<SaleUnit, string> = { BOX: 'علبة', STRIP: 'شريط', BOTTLE: 'زجاجة', PIECE: 'حبة' };
+const UNIT_EN: Record<SaleUnit, string> = { BOX: 'Box', STRIP: 'Strip', BOTTLE: 'Bottle', PIECE: 'Piece' };
+
+type RatePreview = {
+  productId: string;
+  sku: string;
+  nameAr: string;
+  nameEn: string;
+  oldPrice: string;
+  newPrice: string;
+  changePct: string;
+  belowCost: boolean;
 };
 
 export type PurchaseInput = {
   supplierId: string;
+  priority?: 'LOW' | 'NORMAL' | 'HIGH';
+  notes?: string;
   lines: {
     productId?: string;
     code?: string;
     qty: number;
-    unitCost: string;
+    unitCost?: string;
     sellPrice?: string;
-    batchNo: string;
-    expiry: string;
-    location: string;
-    manufacturedAt?: string;
-    serialNo?: string;
-    bonusQty?: number;
-    unitCode?: string;
+    pack?: ItemPack;
   }[];
 };
 
@@ -156,13 +138,36 @@ export type ReceiveLine = {
   qty: number;
   unitCost: string;
   sellPrice?: string;
+  rejectedQty?: number;
   batchNo: string;
   expiry: string;
   location: string;
+  condition?: 'AVAILABLE' | 'REJECTED' | 'QUARANTINE' | 'DAMAGED';
   manufacturedAt?: string;
   serialNo?: string;
   bonusQty?: number;
   unitCode?: string;
+  pack?: ItemPack;
+};
+
+export type GoodsReceiptInput = {
+  clientKey: string;
+  purchaseId?: string;
+  opening?: boolean;
+  override?: boolean;
+  supplierInvoice?: string;
+  currency?: 'SDG' | 'USD';
+  discount?: string;
+  tax?: string;
+  charges?: string;
+  post: boolean;
+  lines: ReceiveLine[];
+};
+
+export type InventoryPostInput = {
+  clientKey: string;
+  post: boolean;
+  lines: { receiptLineId: string; qty: number; location: string }[];
 };
 
 export type ProductInput = {
@@ -201,7 +206,13 @@ export class OpsService {
       ]);
       return {
         categories: categories.map((row) => ({ id: row.id, nameAr: row.nameAr, nameEn: row.nameEn })),
-        products: await this.withPrices(tx, tenantId, scope.readBranchId, products.map((product) => this.viewProduct(product, lots))),
+        products: await this.withPrices(
+          tx,
+          tenantId,
+          scope.readBranchId,
+          (await this.paintProducts(tx, products)).map((product) => this.viewProduct(product, lots)),
+        ),
+        stocking: await this.stockingSummary(tx, tenantId, scope.readBranchId),
         scope: { management: scope.management, all: scope.readBranchId === null },
       };
     });
@@ -209,92 +220,41 @@ export class OpsService {
 
   async createProduct(tenantId: string, branchHint: string | null, actorId: string, header: string | null, input: ProductInput) {
     try {
-      const sell = money(input.sellPrice);
-      const cost = money(input.costPrice);
-      const expiry = new Date(input.expiry);
-      if (Number.isNaN(expiry.getTime())) throw new DomainError('VALIDATION_ERROR', 400);
       return await this.prisma.withTenant(tenantId, async (tx) => {
-        const branchId = (await this.access(tx, tenantId, actorId, branchHint, header, true)).writeBranchId;
-        const shelf = await this.shelfSettings(tx, tenantId);
-        const warning = assertReceiptLine({
-          expiry: input.expiry,
-          manufacturedAt: input.manufacturedAt ?? '',
-          qty: input.qtyBase,
-          bonusQty: input.bonusQty ?? 0,
-          serial: input.serialNo ?? '',
-          trackSerial: false,
-          today: khartoumDate(),
-          warnMonths: shelf.warn,
+        const branchId = (await this.access(tx, tenantId, actorId, branchHint, header, false)).readBranchId;
+        const match = await findCommercialDuplicate(tx, {
+          nameEn: input.nameEn,
+          genericName: input.genericName,
+          strength: input.strength,
+          dosageForm: input.form,
+          manufacturer: '',
         });
-        const category = await tx.category.findFirst({ where: { id: input.categoryId, tenantId, isDeleted: false } });
-        if (!category) throw new DomainError('NOT_FOUND', 404);
-        const productId = randomUUID();
-        const lotId = randomUUID();
-        const sku = `P-${productId.slice(0, 8).toUpperCase()}`;
-        await tx.product.create({
+        if (match) throw new DomainError('DUPLICATE_PRODUCT', 409, { fields: { nameEn: 'duplicate', matchId: match.id, matchCode: match.code } });
+        const request = await tx.newCatalogItemRequest.create({
           data: {
-            id: productId,
             tenantId,
-            categoryId: category.id,
-            sku,
+            branchId,
+            requestedBy: actorId,
             nameAr: input.nameAr,
             nameEn: input.nameEn,
             genericName: input.genericName,
-            form: input.form,
             strength: input.strength,
-            reorderLevel: input.reorderLevel,
-            sellPrice: sell,
-            costPrice: cost,
-            isLocal: true,
-            createdBy: actorId,
+            itemType: 'Medicine',
+            note: 'Submitted from the pharmacy instead of a local medicine master.',
+            status: 'PENDING',
           },
+          select: { id: true },
         });
-        await tx.stockLot.create({
-          data: {
-            id: lotId,
-            tenantId,
-            branchId,
-            productId,
-            batchNo: input.batchNo,
-            expiry,
-            manufacturedAt: input.manufacturedAt ? new Date(input.manufacturedAt) : null,
-            serialNo: input.serialNo?.trim() || null,
-            bonusQty: input.bonusQty ?? 0,
-            qtyBase: input.qtyBase + (input.bonusQty ?? 0),
-            location: input.location,
-            createdBy: actorId,
-          },
-        });
-        await tx.stockMovement.create({
-          data: {
-            tenantId,
-            branchId,
-            productId,
-            lotId,
-            type: 'RECEIVE',
-            qtyBase: input.qtyBase + (input.bonusQty ?? 0),
-            note: input.nameAr,
-            refType: 'PRODUCT',
-            refId: productId,
-            createdBy: actorId,
-          },
-        });
-        const received = input.qtyBase + (input.bonusQty ?? 0);
-        const total = mulMoney(cost, String(received));
-        await this.postJournal(tx, tenantId, actorId, 'إدخال صنف', 'New product', [
-          { code: '1200', debit: total, credit: '0.00' },
-          { code: '1000', debit: '0.00', credit: total },
-        ]);
         await this.audit(tx, {
           tenantId,
           actorId,
           branchId,
-          action: 'product.create',
-          entityType: 'Product',
-          entityId: productId,
-          newJson: JSON.stringify({ sku, isLocal: true }),
+          action: 'catalog.request',
+          entityType: 'NewCatalogItemRequest',
+          entityId: request.id,
+          newJson: JSON.stringify({ nameEn: input.nameEn }),
         });
-        return { id: productId, sku, warning };
+        return { id: request.id, requested: true };
       });
     } catch (error) {
       this.rethrow(error);
@@ -384,7 +344,12 @@ export class OpsService {
         tx.stockLot.findMany({ where: lotWhere }),
       ]);
       return {
-        products: await this.withPrices(tx, tenantId, scope.readBranchId, products.map((product) => this.viewProduct(product, lots))),
+        products: await this.withPrices(
+          tx,
+          tenantId,
+          scope.readBranchId,
+          (await this.paintProducts(tx, products)).map((product) => this.viewProduct(product, lots)),
+        ),
         customers: customers.map((row) => ({ id: row.id, nameAr: row.nameAr, nameEn: row.nameEn })),
         sales: sales.map((sale) => ({
           id: sale.id,
@@ -419,19 +384,40 @@ export class OpsService {
         if (products.length !== ids.length) throw new DomainError('NOT_FOUND', 404);
         const byId = new Map(products.map((product) => [product.id, product]));
         const priceMap = await this.priceQuote(tx, tenantId, branchId, ids);
+        const listed = await tx.priceList.findFirst({ where: { tenantId, isActive: true, status: 'ACTIVE' }, select: { id: true } });
+        const packs = await this.itemPacks(tx, tenantId, ids);
         let subtotal = '0.00';
         let cost = '0.00';
         const priced = input.lines.map((line) => {
           const product = byId.get(line.productId);
           if (!product) throw new DomainError('NOT_FOUND', 404);
+          const pack = packs.get(product.id) ?? null;
+          const choice = line.unit && pack ? saleChoices(pack).find((item) => item.unit === line.unit) : undefined;
+          if (line.unit && pack && !choice) throw new DomainError('VALIDATION_ERROR', 400);
+          const sold = choice ?? { unit: 'PIECE' as const, pieces: 1, divide: 1 };
+          const stockQty = line.qty * sold.pieces;
+          if (!Number.isSafeInteger(stockQty) || stockQty > 1_000_000) throw new DomainError('VALIDATION_ERROR', 400);
           const quote = priceMap.get(product.id);
-          const unitPrice = quote?.amount ?? cash(product.sellPrice);
-          if (cmpMoney(unitPrice, '0.00') <= 0) throw new DomainError('VALIDATION_ERROR', 400);
+          const container = quote?.amount ?? (listed ? '' : cash(product.sellPrice));
+          if (!container || cmpMoney(container, '0.00') <= 0) throw new DomainError(listed ? 'NO_SELL_PRICE' : 'VALIDATION_ERROR', 400);
+          const unitPrice = containerUnitPrice(container, sold.divide);
           const lineTotal = mulMoney(unitPrice, String(line.qty));
-          const costTotal = mulMoney(cash(product.costPrice), String(line.qty));
+          const costTotal = mulMoney(mulMoney(cash(product.costPrice), String(sold.pieces)), String(line.qty));
           subtotal = addMoney(subtotal, lineTotal);
           cost = addMoney(cost, costTotal);
-          return { product, qty: line.qty, lineTotal, costTotal, unitPrice, quote };
+          const named = Boolean(pack && line.unit);
+          return {
+            product,
+            qty: line.qty,
+            stockQty,
+            lineTotal,
+            costTotal,
+            unitPrice,
+            quote,
+            nameAr: named ? `${product.nameAr} · ${UNIT_AR[sold.unit]}` : product.nameAr,
+            nameEn: named ? `${product.nameEn} · ${UNIT_EN[sold.unit]}` : product.nameEn,
+            unitCost: mulMoney(cash(product.costPrice), String(sold.pieces)),
+          };
         });
         if (cmpMoney(discount, subtotal) > 0) throw new DomainError('VALIDATION_ERROR', 400);
         const total = subMoney(subtotal, discount);
@@ -439,7 +425,7 @@ export class OpsService {
         const saleId = randomUUID();
         const docNo = `S-${saleId.slice(0, 8).toUpperCase()}`;
         for (const line of priced) {
-          await this.takeStock(tx, tenantId, branchId, actorId, line.product.id, line.qty, 'SALE', saleId, docNo);
+          await this.takeStock(tx, tenantId, branchId, actorId, line.product.id, line.stockQty, 'SALE', saleId, docNo);
         }
         await tx.sale.create({
           data: {
@@ -466,13 +452,13 @@ export class OpsService {
               tenantId,
               saleId,
               productId: line.product.id,
-              nameAr: line.product.nameAr,
-              nameEn: line.product.nameEn,
+              nameAr: line.nameAr,
+              nameEn: line.nameEn,
               qty: line.qty,
               unitPrice: line.unitPrice,
               lineTotal: line.lineTotal,
               costTotal: line.costTotal,
-              unitCost: cash(line.product.costPrice),
+              unitCost: line.unitCost,
               discountAmount: '0.00',
               priceListId: line.quote?.listId ?? null,
               priceListVersionNo: line.quote?.version ?? null,
@@ -496,16 +482,40 @@ export class OpsService {
   purchasing(tenantId: string, userId: string, jwtBranch: string | null, header: string | null) {
     return this.prisma.withTenant(tenantId, async (tx) => {
       const scope = await this.access(tx, tenantId, userId, jwtBranch, header, false);
-      const [orders, suppliers, products] = await Promise.all([
+      const orderWhere = scope.readBranchId ? { tenantId, branchId: scope.readBranchId } : { tenantId };
+      const [orders, foundSuppliers, products, receipts, stocking] = await Promise.all([
         tx.purchaseOrder.findMany({
-          where: scope.readBranchId ? { tenantId, branchId: scope.readBranchId } : { tenantId },
+          where: orderWhere,
           orderBy: { orderedAt: 'desc' },
           take: 30,
           include: { lines: { include: { product: true } }, supplier: true },
         }),
         tx.supplier.findMany({ where: { tenantId, isDeleted: false }, orderBy: { nameAr: 'asc' } }),
         tx.product.findMany({ where: { tenantId, isDeleted: false }, orderBy: { nameAr: 'asc' } }),
+        tx.goodsReceipt.findMany({
+          where: { ...orderWhere, source: 'PROCUREMENT', status: 'POSTED' },
+          include: { lines: { select: { purchaseLineId: true, qty: true, bonusQty: true, postedQty: true, condition: true } } },
+        }),
+        this.stockingSummary(tx, tenantId, scope.readBranchId),
       ]);
+      const missing = missingSudanSuppliers(foundSuppliers.map((row) => row.nameEn));
+      const suppliers = missing.length === 0
+        ? foundSuppliers
+        : await tx.supplier.createMany({
+          data: missing.map((supplier) => ({
+            id: randomUUID(),
+            tenantId,
+            nameAr: supplier.nameAr,
+            nameEn: supplier.nameEn,
+            phone: supplier.phone,
+            city: supplier.city,
+            balance: '0.00',
+          })),
+        }).then(() => tx.supplier.findMany({ where: { tenantId, isDeleted: false }, orderBy: { nameAr: 'asc' } }));
+      const namedProducts = await this.paintProducts(tx, products);
+      const namedLines = new Map(
+        (await this.paintProducts(tx, orders.flatMap((order) => order.lines.map((line) => line.product)))).map((product) => [product.id, product]),
+      );
       return {
         suppliers: suppliers.map((row) => ({
           id: row.id,
@@ -514,8 +524,10 @@ export class OpsService {
           phone: row.phone,
           city: row.city,
           balance: cash(row.balance),
+          system: isSystemSupplier(row.nameEn),
         })),
-        products: products.map((row) => ({
+        canCreateSupplier: scope.canViewAll,
+        products: namedProducts.map((row) => ({
           id: row.id,
           sku: row.sku,
           nameAr: row.nameAr,
@@ -528,22 +540,40 @@ export class OpsService {
           sellPrice: cash(row.sellPrice),
           trackSerial: row.trackSerial,
         })),
-        orders: orders.map((order) => ({
-          id: order.id,
-          docNo: order.docNo,
-          status: order.status,
-          total: cash(order.total),
-          orderedAt: order.orderedAt.toISOString(),
-          supplierAr: order.supplier.nameAr,
-          supplierEn: order.supplier.nameEn,
-          lines: order.lines.map((line) => ({
-            qty: line.qty,
-            lineTotal: cash(line.lineTotal),
-            productId: line.productId,
-            nameAr: line.product.nameAr,
-            nameEn: line.product.nameEn,
-          })),
-        })),
+        stocking,
+        orders: orders.map((order) => {
+          const received = receipts
+            .filter((receipt) => receipt.purchaseId === order.id)
+            .flatMap((receipt) => receipt.lines)
+            .map((line) => ({
+              condition: line.condition,
+              received: line.qty + line.bonusQty,
+              posted: line.postedQty,
+            }));
+          return {
+            id: order.id,
+            docNo: order.docNo,
+            status: order.status,
+            stockStatus: orderStockState(received),
+            total: cash(order.total),
+            orderedAt: order.orderedAt.toISOString(),
+            supplierAr: order.supplier.nameAr,
+            supplierEn: order.supplier.nameEn,
+            supplierId: order.supplierId,
+            lines: order.lines.map((line) => ({
+              id: line.id,
+              qty: line.qty,
+              receivedQty: line.receivedQty,
+              unitCost: cash(line.unitCost),
+              lineTotal: cash(line.lineTotal),
+              productId: line.productId,
+              nameAr: namedLines.get(line.productId)?.nameAr ?? line.product.nameAr,
+              nameEn: namedLines.get(line.productId)?.nameEn ?? line.product.nameEn,
+              strength: namedLines.get(line.productId)?.strength ?? line.product.strength,
+              form: namedLines.get(line.productId)?.form ?? line.product.form,
+            })),
+          };
+        }),
       };
     });
   }
@@ -570,30 +600,15 @@ export class OpsService {
         const products = await tx.product.findMany({ where: { tenantId, id: { in: ids }, isDeleted: false } });
         if (products.length !== ids.length) throw new DomainError('NOT_FOUND', 404);
         const byId = new Map(products.map((product) => [product.id, product]));
-        const shelf = await this.shelfSettings(tx, tenantId);
-        const warnings: string[] = [];
         let total = '0.00';
         const lines = readyLines.map((line) => {
           const product = byId.get(line.productId);
           if (!product) throw new DomainError('NOT_FOUND', 404);
-          const unitCost = money(line.unitCost);
-          const bonus = line.bonusQty ?? 0;
-          const lineTotal = mulMoney(unitCost, String(line.qty + bonus));
+          const unitCost = line.unitCost ? money(line.unitCost) : '0.00';
+          const lineTotal = mulMoney(unitCost, String(line.qty));
           total = addMoney(total, lineTotal);
-          const expiry = new Date(line.expiry);
-          if (Number.isNaN(expiry.getTime())) throw new DomainError('VALIDATION_ERROR', 400);
-          const warning = assertReceiptLine({
-            expiry: line.expiry,
-            manufacturedAt: line.manufacturedAt ?? '',
-            qty: line.qty,
-            bonusQty: bonus,
-            serial: line.serialNo ?? '',
-            trackSerial: product.trackSerial,
-            today: khartoumDate(),
-            warnMonths: shelf.warn,
-          });
-          if (warning) warnings.push(`${product.sku}:${warning}`);
-          return { ...line, unitCost, lineTotal, expiry, bonus, product };
+          if (line.sellPrice) money(line.sellPrice);
+          return { ...line, unitCost, lineTotal, product };
         });
         const purchaseId = randomUUID();
         const docNo = `PO-${purchaseId.slice(0, 8).toUpperCase()}`;
@@ -604,82 +619,39 @@ export class OpsService {
             branchId,
             supplierId: supplier.id,
             docNo,
-            status: 'RECEIVED',
+            status: 'ORDERED',
+            priority: input.priority ?? 'NORMAL',
+            notes: input.notes ?? '',
             total,
             orderedAt: new Date(),
             createdBy: actorId,
           },
         });
         for (const line of lines) {
-          const lotId = randomUUID();
+          if (line.pack) await this.rememberPack(tx, tenantId, actorId, line.productId, line.pack);
           await tx.purchaseLine.create({
             data: {
               tenantId,
               purchaseId,
               productId: line.productId,
               qty: line.qty,
+              receivedQty: 0,
               unitCost: line.unitCost,
               lineTotal: line.lineTotal,
               createdBy: actorId,
             },
           });
-          await tx.stockLot.create({
-            data: {
-              id: lotId,
-              tenantId,
-              branchId,
-              productId: line.productId,
-              batchNo: line.batchNo,
-              expiry: line.expiry,
-              manufacturedAt: line.manufacturedAt ? new Date(line.manufacturedAt) : null,
-              serialNo: line.serialNo?.trim() || null,
-              unitCode: line.unitCode || 'BASE',
-              bonusQty: line.bonus,
-              qtyBase: line.qty + line.bonus,
-              location: line.location,
-              createdBy: actorId,
-            },
-          });
-          await tx.stockMovement.create({
-            data: {
-              tenantId,
-              branchId,
-              productId: line.productId,
-              lotId,
-              type: 'RECEIVE',
-              qtyBase: line.qty + line.bonus,
-              note: docNo,
-              refType: 'PURCHASE',
-              refId: purchaseId,
-              createdBy: actorId,
-            },
-          });
-          await tx.product.update({
-            where: { id: line.productId },
-            data: {
-              costPrice: line.unitCost,
-              ...(line.sellPrice ? { sellPrice: money(line.sellPrice) } : {}),
-            },
-          });
         }
-        await tx.supplier.update({
-          where: { id: supplier.id },
-          data: { balance: addMoney(cash(supplier.balance), total) },
-        });
-        await this.postJournal(tx, tenantId, actorId, `استلام ${docNo}`, `Receipt ${docNo}`, [
-          { code: '1200', debit: total, credit: '0.00' },
-          { code: '2000', debit: '0.00', credit: total },
-        ]);
         await this.audit(tx, {
           tenantId,
           actorId,
           branchId,
-          action: 'purchase.receive',
+          action: 'purchase.order',
           entityType: 'PurchaseOrder',
           entityId: purchaseId,
-          newJson: JSON.stringify({ docNo, total }),
+          newJson: JSON.stringify({ docNo, total, status: 'ORDERED' }),
         });
-        return { id: purchaseId, docNo, total, warnings };
+        return { id: purchaseId, docNo, total, status: 'ORDERED', warnings: [] as string[] };
       });
     } catch (error) {
       this.rethrow(error);
@@ -787,23 +759,30 @@ export class OpsService {
     tenantId: string,
     branchHint: string | null,
     actorId: string,
-    input: { displayName: string; email: string; password: string; roleCode: string; branchId?: string },
+    input: { displayName: string; email: string; phone: string; password: string; roleCode: string; branchId?: string },
   ) {
     const passwordHash = await this.passwords.hash(input.password);
+    const phone = input.phone.trim();
+    const email = input.email.trim();
     return this.prisma.withTenant(tenantId, async (tx) => {
       const branchId = input.branchId
         ? (await this.access(tx, tenantId, actorId, input.branchId, input.branchId, true)).writeBranchId
         : (await this.access(tx, tenantId, actorId, branchHint, null, true)).writeBranchId;
       const role = await tx.role.findFirst({ where: { tenantId, code: input.roleCode, isDeleted: false } });
       if (!role) throw new DomainError('VALIDATION_ERROR', 400);
-      const existing = await tx.user.findFirst({ where: { tenantId, email: input.email, isDeleted: false } });
-      if (existing) throw new DomainError('VALIDATION_ERROR', 400);
+      const samePhone = await tx.user.findFirst({ where: { tenantId, phone, isDeleted: false } });
+      if (samePhone) throw new DomainError('VALIDATION_ERROR', 409, { fields: { phone: 'taken' } });
+      if (email) {
+        const sameEmail = await tx.user.findFirst({ where: { tenantId, email, isDeleted: false } });
+        if (sameEmail) throw new DomainError('VALIDATION_ERROR', 409, { fields: { email: 'taken' } });
+      }
       const userId = randomUUID();
       await tx.user.create({
         data: {
           id: userId,
           tenantId,
-          email: input.email,
+          email: email || null,
+          phone,
           passwordHash,
           displayName: input.displayName,
           isActive: true,
@@ -831,10 +810,27 @@ export class OpsService {
       const defaults = [
         { key: 'shelfLifeMonths', valueAr: '36', valueEn: '36' },
         { key: 'expiryWarnMonths', valueAr: '6', valueEn: '6' },
+        { key: 'receiptWidth', valueAr: '58', valueEn: '58' },
+        { key: 'receiptFooter', valueAr: 'شكراً لزيارتكم', valueEn: 'Thank you' },
+        { key: 'receiptShowPhone', valueAr: '1', valueEn: '1' },
+        ...defaultAlertSettings().map((item) => ({ key: item.key, valueAr: item.value, valueEn: item.value })),
       ];
+      const version = await tx.pharmacySetting.findFirst({ where: { tenantId, key: 'alertStandardsVersion' } });
       for (const item of defaults) {
         const found = await tx.pharmacySetting.findFirst({ where: { tenantId, key: item.key } });
-        if (!found) await tx.pharmacySetting.create({ data: { tenantId, ...item } });
+        if (!found) {
+          await tx.pharmacySetting.create({ data: { tenantId, ...item } });
+          continue;
+        }
+        const previous = PREVIOUS_ALERT_DEFAULTS[item.key];
+        if (!version && previous && found.valueEn === previous && found.valueEn !== item.valueEn) {
+          await tx.pharmacySetting.update({ where: { id: found.id }, data: { valueAr: item.valueAr, valueEn: item.valueEn } });
+        }
+      }
+      if (!version) {
+        await tx.pharmacySetting.create({
+          data: { tenantId, key: 'alertStandardsVersion', valueAr: ALERT_STANDARD_VERSION, valueEn: ALERT_STANDARD_VERSION },
+        });
       }
       const [rows, tenant] = await Promise.all([
         tx.pharmacySetting.findMany({ where: { tenantId }, orderBy: { key: 'asc' } }),
@@ -848,9 +844,26 @@ export class OpsService {
     });
   }
 
-  saveSetting(tenantId: string, input: { key: string; valueAr: string; valueEn: string }) {
+  saveSetting(tenantId: string, userId: string, input: { key: string; valueAr: string; valueEn: string }) {
     return this.prisma.withTenant(tenantId, async (tx) => {
+      if (input.key.startsWith('alert')) {
+        const links = await tx.userBranchRole.findMany({ where: { tenantId, userId }, include: { role: true } });
+        const perms = links.flatMap((link) => {
+          const code = link.role.code as RoleCode;
+          return code in ROLE_PERMISSIONS ? [...ROLE_PERMISSIONS[code]] : [];
+        });
+        if (!canConfigureAlerts(perms)) throw new DomainError('UNAUTHORIZED', 403);
+        try {
+          assertAlertSetting(input.key, input.valueEn);
+        } catch {
+          throw new DomainError('VALIDATION_ERROR', 400);
+        }
+      }
       const current = await tx.pharmacySetting.findFirst({ where: { tenantId, key: input.key } });
+      if (!current && input.key.startsWith('alert')) {
+        await tx.pharmacySetting.create({ data: { tenantId, key: input.key, valueAr: input.valueAr, valueEn: input.valueEn } });
+        return { ok: true };
+      }
       if (!current) throw new DomainError('NOT_FOUND', 404);
       await tx.pharmacySetting.update({
         where: { id: current.id },
@@ -860,11 +873,16 @@ export class OpsService {
     });
   }
 
+  scopeFor(tenantId: string, userId: string, jwtBranch: string | null, header: string | null) {
+    return this.prisma.withTenant(tenantId, (tx) => this.access(tx, tenantId, userId, jwtBranch, header, false));
+  }
+
   reports(tenantId: string, userId: string, jwtBranch: string | null, header: string | null) {
     return this.prisma.withTenant(tenantId, async (tx) => {
       const scope = await this.access(tx, tenantId, userId, jwtBranch, header, false);
       const start = khartoumDayStart();
       const branch = scope.readBranchId ? { branchId: scope.readBranchId } : {};
+      const stocking = await this.stockingSummary(tx, tenantId, scope.readBranchId);
       const [products, lots, sales, purchases, expenses, suppliers, customers] = await Promise.all([
         tx.product.findMany({ where: { tenantId, isDeleted: false } }),
         tx.stockLot.findMany({ where: { tenantId, ...branch } }),
@@ -889,7 +907,7 @@ export class OpsService {
         tx,
         tenantId,
         scope.readBranchId,
-        products.map((product) => this.viewProduct(product, lots)),
+        (await this.paintProducts(tx, products)).map((product) => this.viewProduct(product, lots)),
       );
       let salesToday = '0.00';
       for (const sale of todaySales) salesToday = addMoney(salesToday, cash(sale.total));
@@ -918,6 +936,7 @@ export class OpsService {
         current.total = addMoney(current.total, cash(line.lineTotal));
         sold.set(line.productId, current);
       }
+      const packByProduct = await this.itemPacks(tx, tenantId, views.map((view) => view.id));
       const top = [...sold.values()].sort((left, right) => right.qty - left.qty).slice(0, 3);
       return {
         salesToday,
@@ -975,8 +994,11 @@ export class OpsService {
             sellPrice: view.sellPrice,
             qty: view.qty,
             reorderLevel: view.reorderLevel,
+            pack: packByProduct.get(view.id) ?? null,
           })),
+          stocking,
         }),
+        stocking,
         suppliers: suppliers.map((row) => ({
           nameAr: row.nameAr,
           nameEn: row.nameEn,
@@ -989,6 +1011,293 @@ export class OpsService {
           branchLimit: scope.branchLimit,
           branchCount: scope.branches.length,
         },
+      };
+    });
+  }
+
+  reportTable(
+    tenantId: string,
+    userId: string,
+    jwtBranch: string | null,
+    header: string | null,
+    kind: string,
+    from: string | null,
+    to: string | null,
+  ) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const links = await tx.userBranchRole.findMany({ where: { tenantId, userId }, include: { role: true } });
+      const roleCode = links[0]?.role.code;
+      const perms = roleCode && roleCode in ROLE_PERMISSIONS ? ROLE_PERMISSIONS[roleCode as RoleCode] : [];
+      if (!perms.includes('reports.view')) throw new DomainError('UNAUTHORIZED', 403);
+      const scope = await this.access(tx, tenantId, userId, jwtBranch, header, false);
+      const branch = scope.readBranchId ? { branchId: scope.readBranchId } : {};
+      const start = from ? new Date(`${from}T00:00:00+02:00`) : new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+      const end = to ? new Date(`${to}T23:59:59+02:00`) : new Date();
+      const tenant = await tx.tenant.findFirst({ where: { id: tenantId } });
+      const columns: { key: string; labelAr: string; labelEn: string; kind: 'text' | 'money' | 'number' | 'date' }[] = [];
+      const rows: Record<string, string | number>[] = [];
+      const push = (row: Record<string, string | number>) => rows.push(row);
+
+      if (kind === 'sales' || kind === 'payments') {
+        columns.push(
+          { key: 'docNo', labelAr: 'الفاتورة', labelEn: 'Invoice', kind: 'text' },
+          { key: 'soldAt', labelAr: 'التاريخ', labelEn: 'Date', kind: 'date' },
+          { key: 'customer', labelAr: 'العميل', labelEn: 'Customer', kind: 'text' },
+          { key: 'items', labelAr: 'الأصناف', labelEn: 'Items', kind: 'text' },
+          { key: 'qty', labelAr: 'الكمية', labelEn: 'Qty', kind: 'number' },
+          { key: 'method', labelAr: 'الدفع', labelEn: 'Payment', kind: 'text' },
+          { key: 'total', labelAr: 'الإجمالي', labelEn: 'Total', kind: 'money' },
+          { key: 'status', labelAr: 'الحالة', labelEn: 'Status', kind: 'text' },
+        );
+        const sales = await tx.sale.findMany({
+          where: { tenantId, ...branch, soldAt: { gte: start, lte: end } },
+          orderBy: { soldAt: 'desc' },
+          include: { lines: true },
+        });
+        for (const sale of sales) {
+          push({
+            docNo: sale.docNo,
+            soldAt: sale.soldAt.toISOString().slice(0, 10),
+            customer: sale.customerName,
+            items: sale.lines.map((line) => `${line.nameAr} × ${line.qty}`).join(' · '),
+            qty: sale.lines.reduce((sum, line) => sum + line.qty, 0),
+            method: sale.paymentMethod,
+            total: cash(sale.total),
+            status: sale.status,
+          });
+        }
+      } else if (kind === 'sales-items') {
+        columns.push(
+          { key: 'name', labelAr: 'الصنف', labelEn: 'Item', kind: 'text' },
+          { key: 'qty', labelAr: 'الكمية', labelEn: 'Qty', kind: 'number' },
+          { key: 'total', labelAr: 'الإجمالي', labelEn: 'Total', kind: 'money' },
+        );
+        const sales = await tx.sale.findMany({
+          where: { tenantId, status: 'POSTED', ...branch, soldAt: { gte: start, lte: end } },
+          select: { id: true },
+        });
+        const lines = sales.length
+          ? await tx.saleLine.findMany({ where: { tenantId, saleId: { in: sales.map((sale) => sale.id) } } })
+          : [];
+        const grouped = new Map<string, { name: string; qty: number; total: string }>();
+        for (const line of lines) {
+          const current = grouped.get(line.productId) ?? { name: line.nameAr, qty: 0, total: '0.00' };
+          current.qty += line.qty;
+          current.total = addMoney(current.total, cash(line.lineTotal));
+          grouped.set(line.productId, current);
+        }
+        for (const row of grouped.values()) push({ name: row.name, qty: row.qty, total: row.total });
+      } else if (kind === 'stock' || kind === 'low-stock' || kind === 'expiry' || kind === 'valuation') {
+        columns.push(
+          { key: 'sku', labelAr: 'الرمز', labelEn: 'SKU', kind: 'text' },
+          { key: 'name', labelAr: 'الصنف', labelEn: 'Item', kind: 'text' },
+          { key: 'qty', labelAr: 'الكمية', labelEn: 'Qty', kind: 'number' },
+          { key: 'cost', labelAr: 'التكلفة', labelEn: 'Cost', kind: 'money' },
+          { key: 'value', labelAr: 'القيمة', labelEn: 'Value', kind: 'money' },
+          { key: 'expiry', labelAr: 'الصلاحية', labelEn: 'Expiry', kind: 'date' },
+        );
+        const products = await tx.product.findMany({ where: { tenantId, isDeleted: false } });
+        const lots = await tx.stockLot.findMany({ where: { tenantId, ...branch } });
+        const today = khartoumDate();
+        const horizon = new Date(`${today}T00:00:00+02:00`);
+        horizon.setUTCDate(horizon.getUTCDate() + 90);
+        for (const product of products) {
+          const mine = lots.filter(
+            (lot) => lot.productId === product.id && (lot.condition || 'AVAILABLE') === 'AVAILABLE' && lot.qtyBase > 0,
+          );
+          const qty = mine.reduce((sum, lot) => sum + lot.qtyBase, 0);
+          const nearest = mine.sort((a, b) => a.expiry.getTime() - b.expiry.getTime())[0];
+          const expired = nearest ? nearest.expiry.toISOString().slice(0, 10) < today : false;
+          const near = nearest ? nearest.expiry <= horizon : false;
+          if (kind === 'low-stock' && qty > product.reorderLevel) continue;
+          if (kind === 'expiry' && !near) continue;
+          if (kind === 'stock' && expired) continue;
+          push({
+            sku: product.sku,
+            name: product.nameAr,
+            qty,
+            cost: cash(product.costPrice),
+            value: mulMoney(cash(product.costPrice), String(qty)),
+            expiry: nearest ? nearest.expiry.toISOString().slice(0, 10) : '',
+          });
+        }
+      } else if (kind === 'purchases') {
+        columns.push(
+          { key: 'docNo', labelAr: 'الأمر', labelEn: 'Order', kind: 'text' },
+          { key: 'supplier', labelAr: 'المورد', labelEn: 'Supplier', kind: 'text' },
+          { key: 'item', labelAr: 'الصنف', labelEn: 'Item', kind: 'text' },
+          { key: 'qty', labelAr: 'الكمية', labelEn: 'Qty', kind: 'number' },
+          { key: 'total', labelAr: 'الإجمالي', labelEn: 'Total', kind: 'money' },
+          { key: 'status', labelAr: 'الحالة', labelEn: 'Status', kind: 'text' },
+          { key: 'date', labelAr: 'التاريخ', labelEn: 'Date', kind: 'date' },
+        );
+        const orders = await tx.purchaseOrder.findMany({
+          where: { tenantId, ...branch, orderedAt: { gte: start, lte: end } },
+          include: { supplier: true, lines: { include: { product: true } } },
+          orderBy: { orderedAt: 'desc' },
+        });
+        for (const order of orders) {
+          const shared = {
+            docNo: order.docNo,
+            supplier: order.supplier.nameAr,
+            status: order.status,
+            date: order.orderedAt.toISOString().slice(0, 10),
+          };
+          if (order.lines.length === 0) {
+            push({ ...shared, item: '', qty: 0, total: cash(order.total) });
+            continue;
+          }
+          for (const line of order.lines) {
+            push({ ...shared, item: line.product.nameAr, qty: line.qty, total: cash(line.lineTotal) });
+          }
+        }
+      } else if (kind === 'receipts') {
+        columns.push(
+          { key: 'docNo', labelAr: 'الاستلام', labelEn: 'Receipt', kind: 'text' },
+          { key: 'date', labelAr: 'التاريخ', labelEn: 'Date', kind: 'date' },
+          { key: 'supplier', labelAr: 'المورد', labelEn: 'Supplier', kind: 'text' },
+          { key: 'item', labelAr: 'الصنف', labelEn: 'Item', kind: 'text' },
+          { key: 'qty', labelAr: 'الكمية', labelEn: 'Qty', kind: 'number' },
+          { key: 'status', labelAr: 'الحالة', labelEn: 'Status', kind: 'text' },
+        );
+        const receipts = await tx.goodsReceipt.findMany({
+          where: { tenantId, ...branch, receivedAt: { gte: start, lte: end } },
+          include: { supplier: true, lines: { include: { product: true } } },
+          orderBy: { receivedAt: 'desc' },
+        });
+        for (const receipt of receipts) {
+          const shared = {
+            docNo: receipt.docNo,
+            date: receipt.receivedAt.toISOString().slice(0, 10),
+            supplier: receipt.supplier?.nameAr ?? '',
+            status: receipt.status,
+          };
+          if (receipt.lines.length === 0) {
+            push({ ...shared, item: '', qty: 0 });
+            continue;
+          }
+          for (const line of receipt.lines) {
+            push({ ...shared, item: line.product.nameAr, qty: line.qty + line.bonusQty });
+          }
+        }
+      } else if (kind === 'customers' || kind === 'suppliers') {
+        columns.push(
+          { key: 'name', labelAr: 'الاسم', labelEn: 'Name', kind: 'text' },
+          { key: 'phone', labelAr: 'الهاتف', labelEn: 'Phone', kind: 'text' },
+          { key: 'balance', labelAr: 'الرصيد', labelEn: 'Balance', kind: 'money' },
+        );
+        if (kind === 'customers') {
+          const people = await tx.customer.findMany({ where: { tenantId, isDeleted: false }, orderBy: { nameAr: 'asc' } });
+          for (const person of people) push({ name: person.nameAr, phone: person.phone ?? '', balance: cash(person.balance) });
+        } else {
+          const people = await tx.supplier.findMany({ where: { tenantId, isDeleted: false }, orderBy: { nameAr: 'asc' } });
+          for (const person of people) push({ name: person.nameAr, phone: person.phone ?? '', balance: cash(person.balance) });
+        }
+      } else if (kind === 'profit') {
+        columns.push(
+          { key: 'name', labelAr: 'الصنف', labelEn: 'Item', kind: 'text' },
+          { key: 'sales', labelAr: 'المبيعات', labelEn: 'Sales', kind: 'money' },
+          { key: 'cost', labelAr: 'التكلفة', labelEn: 'Cost', kind: 'money' },
+          { key: 'margin', labelAr: 'الهامش', labelEn: 'Margin', kind: 'money' },
+        );
+        const sales = await tx.sale.findMany({
+          where: { tenantId, status: 'POSTED', ...branch, soldAt: { gte: start, lte: end } },
+          select: { id: true },
+        });
+        const lines = sales.length
+          ? await tx.saleLine.findMany({ where: { tenantId, saleId: { in: sales.map((sale) => sale.id) } } })
+          : [];
+        const grouped = new Map<string, { name: string; sales: string; cost: string }>();
+        for (const line of lines) {
+          const current = grouped.get(line.productId) ?? { name: line.nameAr, sales: '0.00', cost: '0.00' };
+          current.sales = addMoney(current.sales, cash(line.lineTotal));
+          current.cost = addMoney(current.cost, cash(line.costTotal));
+          grouped.set(line.productId, current);
+        }
+        for (const row of grouped.values()) {
+          push({ name: row.name, sales: row.sales, cost: row.cost, margin: subMoney(row.sales, row.cost) });
+        }
+      } else if (kind === 'movements') {
+        columns.push(
+          { key: 'type', labelAr: 'الحركة', labelEn: 'Movement', kind: 'text' },
+          { key: 'qty', labelAr: 'الكمية', labelEn: 'Qty', kind: 'number' },
+          { key: 'note', labelAr: 'ملاحظة', labelEn: 'Note', kind: 'text' },
+          { key: 'at', labelAr: 'التاريخ', labelEn: 'Date', kind: 'date' },
+        );
+        const moves = await tx.stockMovement.findMany({
+          where: { tenantId, ...branch, createdAt: { gte: start, lte: end } },
+          orderBy: { createdAt: 'desc' },
+          take: 500,
+        });
+        for (const move of moves) {
+          push({ type: move.type, qty: move.qtyBase, note: move.note, at: move.createdAt.toISOString().slice(0, 10) });
+        }
+      } else if (kind === 'prices') {
+        columns.push(
+          { key: 'list', labelAr: 'القائمة', labelEn: 'List', kind: 'text' },
+          { key: 'amount', labelAr: 'السعر', labelEn: 'Amount', kind: 'money' },
+          { key: 'at', labelAr: 'التاريخ', labelEn: 'Date', kind: 'date' },
+        );
+        const history = await tx.priceHistory.findMany({
+          where: { tenantId, createdAt: { gte: start, lte: end } },
+          orderBy: { createdAt: 'desc' },
+          take: 500,
+        });
+        for (const row of history) {
+          push({ list: row.priceListId, amount: cash(row.newAmount), at: row.createdAt.toISOString().slice(0, 10) });
+        }
+      } else {
+        throw new DomainError('VALIDATION_ERROR', 400);
+      }
+
+      let total = '0.00';
+      const moneyKey = columns.find((column) => column.kind === 'money' && ['total', 'value', 'balance', 'margin', 'sales'].includes(column.key))?.key;
+      if (moneyKey) {
+        for (const row of rows) total = addMoney(total, String(row[moneyKey] ?? '0'));
+      } else if (columns.some((column) => column.key === 'qty')) {
+        let qty = 0;
+        for (const row of rows) qty += Number(row.qty ?? 0);
+        total = String(qty);
+      }
+      return {
+        kind,
+        titleAr: tenant?.tradeNameAr ?? 'دواء',
+        titleEn: tenant?.tradeNameEn ?? 'Dawaa',
+        phone: tenant?.phone ?? '',
+        accountCode: tenant?.accountCode ?? '',
+        from: start.toISOString().slice(0, 10),
+        to: end.toISOString().slice(0, 10),
+        generatedAt: new Date().toISOString(),
+        columns,
+        rows,
+        total,
+        rowCount: rows.length,
+        illustrative: true,
+      };
+    });
+  }
+
+  private async paintProducts<T extends { globalItemId?: string | null; nameAr: string; nameEn: string; genericName: string; form: string; strength: string }>(
+    tx: Tx,
+    products: T[],
+  ): Promise<T[]> {
+    const ids = [...new Set(products.map((product) => product.globalItemId).filter((id): id is string => Boolean(id)))];
+    if (ids.length === 0) return products;
+    const rows = await tx.globalCatalogItem.findMany({
+      where: { id: { in: ids }, status: { in: ['active', 'PUBLISHED'] } },
+      select: { id: true, nameAr: true, nameEn: true, genericName: true, dosageForm: true, strength: true, brandNameAr: true, brandNameEn: true },
+    });
+    const labels = new Map(rows.map((row) => [row.id, row]));
+    return products.map((product) => {
+      const label = product.globalItemId ? labels.get(product.globalItemId) : undefined;
+      if (!label) return product;
+      return {
+        ...product,
+        nameAr: plainMedicineName(label.brandNameAr || label.nameAr),
+        nameEn: plainMedicineName(label.brandNameEn || label.nameEn),
+        genericName: plainMedicineName(label.genericName),
+        form: label.dosageForm || product.form,
+        strength: label.strength || product.strength,
       };
     });
   }
@@ -1011,11 +1320,15 @@ export class OpsService {
       trackSerial: boolean;
       gtin: string | null;
     },
-    lots: { productId: string; qtyBase: number; expiry: Date; location: string }[],
+    lots: { productId: string; qtyBase: number; expiry: Date; location: string; condition?: string | null }[],
   ): ProductView {
-    const mine = lots.filter((lot) => lot.productId === product.id);
+    const today = khartoumDate();
+    const mine = lots.filter((lot) =>
+      lot.productId === product.id &&
+      isSellableLot({ qtyBase: lot.qtyBase, expiry: lot.expiry.toISOString(), condition: lot.condition }, today),
+    );
     const qty = mine.reduce((sum, lot) => sum + lot.qtyBase, 0);
-    const withQty = mine.filter((lot) => lot.qtyBase > 0).sort((left, right) => left.expiry.getTime() - right.expiry.getTime());
+    const withQty = [...mine].sort((left, right) => left.expiry.getTime() - right.expiry.getTime());
     return {
       id: product.id,
       sku: product.sku,
@@ -1038,28 +1351,61 @@ export class OpsService {
     };
   }
 
-  catalog(tenantId: string, query: string | null) {
+  async catalog(tenantId: string, query: string | null) {
     const needle = (query ?? '').trim();
-    return this.prisma.withTenant(tenantId, async (tx) => {
-      const standards = await tx.standardMedicine.findMany({
-        where: needle
-          ? {
-              OR: [
-                { code: { contains: needle } },
-                { nameAr: { contains: needle } },
-                { nameEn: { contains: needle } },
-                { genericName: { contains: needle } },
-                { gtin: { contains: needle } },
-                { strength: { contains: needle } },
-              ],
-            }
-          : {},
-        orderBy: { nameEn: 'asc' },
-        take: needle ? 24 : 30,
+    const found = await searchPublishedLibrary(this.prisma.client, needle, 1);
+    const rows: LibraryHit[] = [...found.rows];
+    if (needle && rows.length < 8) {
+      const legacy = await this.prisma.client.standardMedicine.findMany({
+        where: {
+          status: 'PUBLISHED',
+          OR: [
+            { code: { startsWith: needle } },
+            { nameAr: { startsWith: needle } },
+            { nameEn: { startsWith: needle } },
+            { genericName: { startsWith: needle } },
+            { gtin: { startsWith: needle } },
+          ],
+        },
+        take: 24,
       });
-      if (standards.length === 0) return [];
-      const codes = standards.map((item) => item.code);
-      const gtins = standards.map((item) => item.gtin).filter((value) => value !== '');
+      const seen = new Set(rows.map((row) => row.code));
+      for (const item of legacy) {
+        if (seen.has(item.code)) continue;
+        rows.push({
+          id: '',
+          code: item.code,
+          itemType: 'Medicine',
+          nameAr: plainMedicineName(item.nameAr),
+          nameEn: plainMedicineName(item.nameEn),
+          genericName: plainMedicineName(item.genericName),
+          brandNameAr: '',
+          brandNameEn: '',
+          form: item.form,
+          strength: item.strength,
+          categoryAr: item.categoryAr,
+          categoryEn: item.categoryEn,
+          manufacturer: item.manufacturer,
+          gtin: item.gtin,
+          unitsJson: item.unitsJson,
+          packDescription: item.packDescription,
+          route: item.route,
+          ingredients: item.ingredients,
+          status: item.status,
+          isControlled: item.isControlled,
+          requiresPrescription: item.requiresPrescription,
+          trackSerial: item.trackSerial,
+          storageCondition: '',
+          modelNumber: '',
+          aliases: [item.genericName, item.nameAr, item.nameEn],
+          versionNo: 1,
+        });
+      }
+    }
+    if (rows.length === 0) return [];
+    const codes = rows.map((item) => item.code);
+    const ids = rows.map((item) => item.id).filter(Boolean);
+    return this.prisma.withTenant(tenantId, async (tx) => {
       const products = await tx.product.findMany({
         where: {
           tenantId,
@@ -1067,47 +1413,17 @@ export class OpsService {
           OR: [
             { sku: { in: codes } },
             { masterCode: { in: codes } },
-            ...(gtins.length > 0 ? [{ gtin: { in: gtins } }] : []),
+            ...(ids.length > 0 ? [{ globalItemId: { in: ids } }] : []),
           ],
         },
-        select: { sku: true, masterCode: true, gtin: true },
+        select: { sku: true, masterCode: true, gtin: true, globalItemId: true },
       });
       const imported = new Set(products.flatMap((product) => [product.sku, product.masterCode ?? '', product.gtin ?? '']));
-      const stored = await tx.globalCatalogItem.findMany({
-        where: {
-          OR: [
-            { code: { in: codes } },
-            ...(gtins.length > 0 ? [{ barcodes: { some: { code: { in: gtins } } } }] : []),
-          ],
-        },
-        select: { code: true, storageCondition: true, barcodes: { select: { code: true } } },
-      });
-      const storageOf = (code: string, gtin: string) =>
-        stored.find((row) => row.code === code)?.storageCondition ||
-        stored.find((row) => gtin !== '' && row.barcodes.some((barcode) => barcode.code === gtin))?.storageCondition ||
-        '';
-      return standards.map((item) => ({
-          code: item.code,
-          nameAr: plainMedicineName(item.nameAr),
-          nameEn: plainMedicineName(item.nameEn),
-          genericName: plainMedicineName(item.genericName),
-          form: item.form,
-          strength: item.strength,
-          categoryAr: item.categoryAr,
-          categoryEn: item.categoryEn,
-          gtin: item.gtin,
-          unitsJson: item.unitsJson,
-          packDescription: item.packDescription,
-          manufacturer: item.manufacturer,
-          route: item.route,
-          ingredients: item.ingredients,
-          status: item.status,
-          isControlled: item.isControlled,
-          requiresPrescription: item.requiresPrescription,
-          trackSerial: item.trackSerial,
-          storageCondition: storageOf(item.code, item.gtin),
-          imported: imported.has(item.code) || (item.gtin !== '' && imported.has(item.gtin)),
-        }));
+      const linked = new Set(products.map((product) => product.globalItemId).filter((id): id is string => Boolean(id)));
+      return rows.map((item) => ({
+        ...item,
+        imported: linked.has(item.id) || imported.has(item.code) || (item.gtin !== '' && imported.has(item.gtin)),
+      }));
     });
   }
 
@@ -1138,9 +1454,17 @@ export class OpsService {
       ]);
       const usedIds = new Set(usedRows.map((row) => row.priceListId).filter((id): id is string => id !== null));
       const listById = new Map(lists.map((list) => [list.id, list]));
-      const shared = lists.find((list) => list.scope === 'PHARMACY' && list.isActive) ?? null;
+      const shared = lists
+        .filter((list) => list.scope === 'PHARMACY' && list.isActive && list.status === 'ACTIVE')
+        .sort((left, right) => (right.activatedAt?.getTime() ?? 0) - (left.activatedAt?.getTime() ?? 0))[0] ?? null;
       const branchActivation = scope.readBranchId
-        ? (activations.find((row) => row.branchId === scope.readBranchId && row.isActive) ?? null)
+        ? activations
+            .filter((row) => row.branchId === scope.readBranchId && row.isActive)
+            .sort((left, right) => {
+              const leftAt = listById.get(left.priceListId)?.activatedAt?.getTime() ?? 0;
+              const rightAt = listById.get(right.priceListId)?.activatedAt?.getTime() ?? 0;
+              return rightAt - leftAt;
+            })[0] ?? null
         : null;
       const selectedId = listId ?? branchActivation?.priceListId ?? shared?.id ?? lists[0]?.id ?? null;
       const amounts =
@@ -1148,9 +1472,29 @@ export class OpsService {
           ? []
           : await tx.productPrice.findMany({ where: { tenantId, priceListId: selectedId } });
       const amountByProduct = new Map(amounts.map((row) => [row.productId, cash(row.amount)]));
-      return {
+      const sellingListId = branchActivation?.priceListId ?? (shared && shared.status === 'ACTIVE' ? shared.id : null);
+      const sellingRows =
+        sellingListId === null || sellingListId === selectedId
+          ? amounts
+          : await tx.productPrice.findMany({ where: { tenantId, priceListId: sellingListId } });
+      const sellingByProduct = new Map(sellingRows.map((row) => [row.productId, cash(row.amount)]));
+      const stockLots = await tx.stockLot.groupBy({
+        by: ['productId'],
+        where: {
+          tenantId,
+          qtyBase: { gt: 0 },
+          condition: 'AVAILABLE',
+          ...(scope.readBranchId ? { branchId: scope.readBranchId } : {}),
+        },
+        _sum: { qtyBase: true },
+      });
+      const qtyByProduct = new Map(stockLots.map((row) => [row.productId, row._sum.qtyBase ?? 0]));
+        const named = await this.paintProducts(tx, products);
+        const sellingList = branchActivation ? listById.get(branchActivation.priceListId) ?? null : shared;
+        return {
         using: branchActivation ? 'BRANCH' : 'PHARMACY',
         branchId: scope.readBranchId,
+        sellingOn: sellingList ? khartoumDate(sellingList.effectiveFrom ?? sellingList.activatedAt ?? sellingList.createdAt) : null,
         selectedId,
         lists: lists.map((list) => {
           const link = activations.find((row) => row.priceListId === list.id);
@@ -1192,17 +1536,24 @@ export class OpsService {
             branchEn: link?.branch.nameEn ?? null,
           };
         }),
-        items: products.map((product) => ({
-          productId: product.id,
-          sku: product.sku,
-          nameAr: product.nameAr,
-          nameEn: product.nameEn,
-          genericName: product.genericName,
-          gtin: product.gtin ?? '',
-          cost: cash(product.costPrice),
-          costUsd: product.costUsd ? cash(product.costUsd) : '',
-          amount: amountByProduct.get(product.id) ?? '',
-        })),
+        items: named.map((product) => {
+          const selling = sellingByProduct.get(product.id);
+          const sell = cash(product.sellPrice);
+          const listed = selling && selling !== '0.00' ? selling : sell !== '0.00' ? sell : '';
+          return {
+            productId: product.id,
+            sku: product.sku,
+            nameAr: product.nameAr,
+            nameEn: product.nameEn,
+            genericName: product.genericName,
+            gtin: product.gtin ?? '',
+            cost: cash(product.costPrice),
+            costUsd: product.costUsd ? cash(product.costUsd) : '',
+            amount: amountByProduct.get(product.id) ?? '',
+            qty: qtyByProduct.get(product.id) ?? 0,
+            listedPrice: listed,
+          };
+        }),
       };
     });
   }
@@ -1365,6 +1716,8 @@ export class OpsService {
       if (!list) throw new DomainError('NOT_FOUND', 404);
       if (list.status !== 'DRAFT') throw new DomainError('VALIDATION_ERROR', 400);
       const now = new Date();
+      const nextOn = khartoumDate(list.effectiveFrom ?? now);
+      await this.guardPriceDate(tx, tenantId, list, list.scope === 'BRANCH' ? scope.writeBranchId : null, nextOn);
       if (list.scope === 'PHARMACY') {
         await tx.priceList.updateMany({
           where: { tenantId, scope: 'PHARMACY', listType: list.listType, status: 'ACTIVE' },
@@ -1439,10 +1792,126 @@ export class OpsService {
     });
   }
 
+  async createSupplier(
+    tenantId: string,
+    actorId: string,
+    input: { nameAr: string; nameEn: string; phone: string; city: string; batchNotes?: string },
+  ) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const scope = await this.access(tx, tenantId, actorId, null, null, false);
+      if (!scope.canViewAll) throw new DomainError('UNAUTHORIZED', 403);
+      const found = await tx.supplier.findFirst({
+        where: {
+          tenantId,
+          isDeleted: false,
+          OR: [{ nameAr: input.nameAr }, { nameEn: input.nameEn }],
+        },
+      });
+      if (found) {
+        return { id: found.id, created: false, nameAr: found.nameAr, nameEn: found.nameEn };
+      }
+      const id = randomUUID();
+      await tx.supplier.create({
+        data: {
+          id,
+          tenantId,
+          nameAr: input.nameAr,
+          nameEn: input.nameEn,
+          phone: input.phone || null,
+          city: input.city || null,
+          batchNotes: input.batchNotes ?? '',
+          balance: '0.00',
+          createdBy: actorId,
+        },
+      });
+      return { id, created: true, nameAr: input.nameAr, nameEn: input.nameEn };
+    });
+  }
+
+  supplierDesk(tenantId: string, actorId: string) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const scope = await this.access(tx, tenantId, actorId, null, null, false);
+      const [suppliers, receipts] = await Promise.all([
+        tx.supplier.findMany({ where: { tenantId }, orderBy: { nameAr: 'asc' } }),
+        tx.goodsReceipt.findMany({
+          where: { tenantId, supplierId: { not: null } },
+          orderBy: { receivedAt: 'desc' },
+          take: 300,
+          select: { supplierId: true, lines: { select: { batchNo: true } } },
+        }),
+      ]);
+      const received = new Map<string, string[]>();
+      for (const receipt of receipts) {
+        if (!receipt.supplierId) continue;
+        const list = received.get(receipt.supplierId) ?? [];
+        for (const line of receipt.lines) {
+          const batch = line.batchNo.trim();
+          if (!batch || batch.toUpperCase() === 'N/A' || list.includes(batch) || list.length >= 12) continue;
+          list.push(batch);
+        }
+        received.set(receipt.supplierId, list);
+      }
+      return {
+        canManage: scope.canViewAll,
+        suppliers: suppliers.map((row) => ({
+          id: row.id,
+          nameAr: row.nameAr,
+          nameEn: row.nameEn,
+          phone: row.phone ?? '',
+          city: row.city ?? '',
+          balance: cash(row.balance),
+          active: !row.isDeleted,
+          batchNotes: row.batchNotes,
+          receivedBatches: received.get(row.id) ?? [],
+        })),
+      };
+    });
+  }
+
+  updateSupplier(
+    tenantId: string,
+    actorId: string,
+    supplierId: string,
+    input: { nameAr: string; nameEn: string; phone: string; city: string; batchNotes?: string },
+  ) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const scope = await this.access(tx, tenantId, actorId, null, null, false);
+      if (!scope.canViewAll) throw new DomainError('UNAUTHORIZED', 403);
+      const found = await tx.supplier.findFirst({ where: { id: supplierId, tenantId } });
+      if (!found) throw new DomainError('NOT_FOUND', 404);
+      await tx.supplier.update({
+        where: { tenantId_id: { tenantId, id: found.id } },
+        data: {
+          nameAr: input.nameAr,
+          nameEn: input.nameEn,
+          phone: input.phone || null,
+          city: input.city || null,
+          batchNotes: input.batchNotes ?? '',
+          updatedBy: actorId,
+        },
+      });
+      return { id: found.id };
+    });
+  }
+
+  setSupplierActive(tenantId: string, actorId: string, supplierId: string, isActive: boolean) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const scope = await this.access(tx, tenantId, actorId, null, null, false);
+      if (!scope.canViewAll) throw new DomainError('UNAUTHORIZED', 403);
+      const found = await tx.supplier.findFirst({ where: { id: supplierId, tenantId } });
+      if (!found) throw new DomainError('NOT_FOUND', 404);
+      await tx.supplier.update({
+        where: { tenantId_id: { tenantId, id: found.id } },
+        data: { isDeleted: !isActive, updatedBy: actorId },
+      });
+      return { id: found.id, active: isActive };
+    });
+  }
+
   async createBranch(
     tenantId: string,
     actorId: string,
-    input: { nameAr: string; nameEn: string; city: string; phone: string },
+    input: { nameAr: string; nameEn: string; city: string; addressLine: string; phone: string; latitude: number; longitude: number },
   ) {
     return this.prisma.withTenant(tenantId, async (tx) => {
       const scope = await this.access(tx, tenantId, actorId, null, null, false);
@@ -1459,6 +1928,9 @@ export class OpsService {
           nameEn: input.nameEn,
           isHeadOffice: false,
           city: input.city,
+          addressLine: input.addressLine,
+          latitude: input.latitude.toFixed(6),
+          longitude: input.longitude.toFixed(6),
           phone: input.phone || null,
           createdBy: actorId,
         },
@@ -1495,6 +1967,7 @@ export class OpsService {
     management: 'INDEPENDENT' | 'SHARED';
     branchLimit: number;
     canViewAll: boolean;
+    canManage: boolean;
     branches: { id: string; code: string; nameAr: string; nameEn: string | null; isHeadOffice: boolean; city: string | null }[];
   }> {
     const [branches, links, mode, tenant] = await Promise.all([
@@ -1504,6 +1977,10 @@ export class OpsService {
       tx.tenant.findFirst({ where: { id: tenantId } }),
     ]);
     const canViewAll = links.some((link) => link.role.code === 'OWNER');
+    const canManage = links.some((link) => {
+      const code = link.role.code as RoleCode;
+      return code in ROLE_PERMISSIONS && ROLE_PERMISSIONS[code].includes('users.manage');
+    });
     const allowed = new Set(canViewAll ? branches.map((branch) => branch.id) : links.map((link) => link.branchId));
     if (header && header !== 'all' && !allowed.has(header)) throw new DomainError('UNAUTHORIZED', 403);
     if (writing && header === 'all') throw new DomainError('PICK_BRANCH', 400);
@@ -1518,6 +1995,7 @@ export class OpsService {
       management,
       branchLimit: tenant?.branchLimit ?? 1,
       canViewAll,
+      canManage,
       branches,
     };
   }
@@ -1537,6 +2015,89 @@ export class OpsService {
     return views.map((view) => ({ ...view, sellPrice: map.get(view.id)?.amount ?? view.sellPrice }));
   }
 
+  private async currentSellingOn(
+    tx: Tx,
+    tenantId: string,
+    list: { id: string; scope: string; listType: string },
+    branchId: string | null,
+  ): Promise<string | null> {
+    if (list.scope === 'BRANCH' && branchId) {
+      const links = await tx.branchPriceActivation.findMany({
+        where: { tenantId, branchId, isActive: true, priceList: { listType: list.listType, status: 'ACTIVE', id: { not: list.id } } },
+        include: { priceList: true },
+      });
+      const latest = links.sort((left, right) => (right.priceList.activatedAt?.getTime() ?? 0) - (left.priceList.activatedAt?.getTime() ?? 0))[0];
+      return latest ? khartoumDate(latest.priceList.effectiveFrom ?? latest.priceList.activatedAt ?? latest.priceList.createdAt) : null;
+    }
+    const current = await tx.priceList.findFirst({
+      where: { tenantId, scope: 'PHARMACY', listType: list.listType, status: 'ACTIVE', isActive: true, id: { not: list.id } },
+      orderBy: [{ activatedAt: 'desc' }, { createdAt: 'desc' }],
+    });
+    return current ? khartoumDate(current.effectiveFrom ?? current.activatedAt ?? current.createdAt) : null;
+  }
+
+  private async guardPriceDate(
+    tx: Tx,
+    tenantId: string,
+    list: { id: string; scope: string; listType: string; sourcePriceListId: string | null },
+    branchId: string | null,
+    nextOn: string,
+  ) {
+    const currentOn = await this.currentSellingOn(tx, tenantId, list, branchId);
+    if (priceListDateGate({ nextOn, currentOn, copied: Boolean(list.sourcePriceListId) }) === 'PRICE_DATE') {
+      throw new DomainError('PRICE_DATE', 409);
+    }
+  }
+
+  private async activateProposedList(
+    tx: Tx,
+    tenantId: string,
+    list: { id: string; scope: string; listType: string; sourcePriceListId: string | null; effectiveFrom?: Date | null },
+    actorId: string | null,
+    effectiveFrom?: Date,
+  ) {
+    const now = new Date();
+    const starts = effectiveFrom ?? list.effectiveFrom ?? now;
+    const link = list.scope === 'BRANCH'
+      ? await tx.branchPriceActivation.findFirst({ where: { tenantId, priceListId: list.id } })
+      : null;
+    await this.guardPriceDate(tx, tenantId, list, link?.branchId ?? null, khartoumDate(starts));
+    await tx.priceList.updateMany({
+      where: { tenantId, scope: list.scope, listType: list.listType, status: 'ACTIVE', id: { not: list.id } },
+      data: { isActive: false, status: 'ARCHIVED', effectiveTo: now },
+    });
+    await tx.priceList.update({
+      where: { id: list.id },
+      data: {
+        status: 'ACTIVE',
+        isActive: list.scope === 'PHARMACY',
+        activatedAt: now,
+        activatedBy: actorId,
+        effectiveFrom: effectiveFrom ?? now,
+        effectiveTo: null,
+        updatedBy: actorId,
+      },
+    });
+    const rateRow = await tx.exchangeRate.findFirst({ where: { tenantId, priceListId: list.id } });
+    if (rateRow && rateRow.status !== 'APPROVED') {
+      await tx.exchangeRate.update({ where: { id: rateRow.id }, data: { status: 'APPROVED', updatedBy: actorId } });
+    }
+    if (!list.sourcePriceListId) return;
+    const [previous, next] = await Promise.all([
+      tx.productPrice.findMany({ where: { tenantId, priceListId: list.sourcePriceListId } }),
+      tx.productPrice.findMany({ where: { tenantId, priceListId: list.id } }),
+    ]);
+    const oldBy = new Map(previous.map((row) => [row.productId, cash(row.amount)]));
+    for (const row of next) {
+      const oldAmount = oldBy.get(row.productId) ?? '0.00';
+      const newAmount = cash(row.amount);
+      if (oldAmount === newAmount) continue;
+      await tx.priceHistory.create({
+        data: { tenantId, priceListId: list.id, productId: row.productId, oldAmount, newAmount, createdBy: actorId },
+      });
+    }
+  }
+
   private async priceQuote(
     tx: Tx,
     tenantId: string,
@@ -1544,13 +2105,31 @@ export class OpsService {
     productIds: string[],
   ): Promise<Map<string, { amount: string; listId: string; version: number }>> {
     const map = new Map<string, { amount: string; listId: string; version: number }>();
+    const due = await tx.priceList.findMany({
+      where: { tenantId, status: 'SCHEDULED', effectiveFrom: { lte: new Date() } },
+      orderBy: { createdAt: 'asc' },
+    });
+    for (const list of due) {
+      try {
+        await this.activateProposedList(tx, tenantId, list, null);
+      } catch (error) {
+        if (!(error instanceof DomainError) || error.code !== 'PRICE_DATE') throw error;
+      }
+    }
     if (productIds.length === 0) return map;
-    const shared = await tx.priceList.findFirst({ where: { tenantId, scope: 'PHARMACY', isActive: true, status: 'ACTIVE' } });
+    const shared = await tx.priceList.findFirst({
+      where: { tenantId, scope: 'PHARMACY', isActive: true, status: 'ACTIVE' },
+      orderBy: [{ activatedAt: 'desc' }, { createdAt: 'desc' }],
+    });
     let listId = shared?.id ?? null;
     if (branchId) {
-      const activation = await tx.branchPriceActivation.findFirst({
+      const activeLinks = await tx.branchPriceActivation.findMany({
         where: { tenantId, branchId, isActive: true },
+        include: { priceList: true },
       });
+      const activation = activeLinks.sort(
+        (left, right) => (right.priceList.activatedAt?.getTime() ?? 0) - (left.priceList.activatedAt?.getTime() ?? 0),
+      )[0];
       if (activation) listId = activation.priceListId;
     }
     if (!listId) return map;
@@ -1576,10 +2155,13 @@ export class OpsService {
     note: string,
   ): Promise<void> {
     const lots = await tx.stockLot.findMany({ where: { tenantId, branchId, productId } });
+    const today = khartoumDate();
     const takes = allocateFefo(
-      lots.map((lot) => ({ id: lot.id, qtyBase: lot.qtyBase, expiry: lot.expiry.toISOString() })),
+      lots
+        .filter((lot) => (lot.condition || 'AVAILABLE') === 'AVAILABLE')
+        .map((lot) => ({ id: lot.id, qtyBase: lot.qtyBase, expiry: lot.expiry.toISOString() })),
       qty,
-      khartoumDate(),
+      today,
     );
     for (const take of takes) {
       const lot = lots.find((row) => row.id === take.id);
@@ -1650,6 +2232,7 @@ export class OpsService {
     priceListId: string,
     adjust: RenewAdjust = 'SAME',
     value = '0.00',
+    names?: { nameAr: string; nameEn: string },
   ) {
     try {
       return await this.prisma.withTenant(tenantId, async (tx) => {
@@ -1657,14 +2240,18 @@ export class OpsService {
         if (!scope.canViewAll) throw new DomainError('UNAUTHORIZED', 403);
         const source = await tx.priceList.findFirst({ where: { id: priceListId, tenantId } });
         if (!source) throw new DomainError('NOT_FOUND', 404);
+        const nameAr = names?.nameAr.trim() || `${source.nameAr} ${source.versionNo + 1}`;
+        const nameEn = names?.nameEn.trim() || `${source.nameEn} ${source.versionNo + 1}`;
+        if (nameAr === source.nameAr && nameEn === source.nameEn) throw new DomainError('PRICE_DATE', 409);
         const id = randomUUID();
         const link = await tx.branchPriceActivation.findFirst({ where: { tenantId, priceListId: source.id } });
+        const selling = source.status === 'ACTIVE' && (source.scope === 'PHARMACY' ? source.isActive : Boolean(link?.isActive));
         await tx.priceList.create({
           data: {
             id,
             tenantId,
-            nameAr: `${source.nameAr} ${source.versionNo + 1}`,
-            nameEn: `${source.nameEn} ${source.versionNo + 1}`,
+            nameAr,
+            nameEn,
             scope: source.scope,
             isActive: false,
             code: id.slice(0, 8).toUpperCase(),
@@ -1672,6 +2259,7 @@ export class OpsService {
             status: 'DRAFT',
             versionNo: source.versionNo + 1,
             sourcePriceListId: source.id,
+            effectiveFrom: selling ? source.effectiveFrom ?? khartoumDayStart() : null,
             notes: source.notes,
             createdBy: actorId,
           },
@@ -1683,12 +2271,19 @@ export class OpsService {
         }
         const rows = await tx.productPrice.findMany({ where: { tenantId, priceListId: source.id } });
         for (const row of rows) {
+          const current = cash(row.amount);
+          let amount = current;
+          try {
+            amount = renewAmount(current, adjust, value);
+          } catch (error) {
+            if (!(error instanceof Error) || error.message !== 'PRICE') throw error;
+          }
           await tx.productPrice.create({
             data: {
               tenantId,
               priceListId: id,
               productId: row.productId,
-              amount: renewAmount(cash(row.amount), adjust, value),
+              amount,
               costReference: row.costReference ? cash(row.costReference) : null,
               marginPct: row.marginPct ? cash(row.marginPct) : null,
               createdBy: actorId,
@@ -1880,7 +2475,15 @@ export class OpsService {
   rates(tenantId: string) {
     return this.prisma.withTenant(tenantId, async (tx) => {
       const rows = await tx.exchangeRate.findMany({ where: { tenantId }, orderBy: { notedAt: 'desc' }, take: 12 });
-      return rows.map((row) => ({ id: row.id, currency: row.currency, rate: cash(row.rate), notedAt: row.notedAt.toISOString() }));
+      return rows.map((row) => ({
+        id: row.id,
+        currency: row.currency,
+        rate: cash(row.rate),
+        status: row.status,
+        priceListId: row.priceListId,
+        reason: row.reason,
+        notedAt: row.notedAt.toISOString(),
+      }));
     });
   }
 
@@ -1894,6 +2497,112 @@ export class OpsService {
         data: { id, tenantId, currency: 'USD', rate: amount, notedAt: new Date(), createdBy: actorId },
       });
       return { id, rate: amount };
+    });
+  }
+
+  async proposeUsdRate(
+    tenantId: string,
+    actorId: string,
+    input: { rate: string; action: 'preview' | 'draft' | 'submit' | 'reject' | 'approve'; proposalId?: string; reason?: string; effectiveOn?: string },
+  ) {
+    const nextRate = money(input.rate);
+    if (cmpMoney(nextRate, '0.00') <= 0) throw new DomainError('VALIDATION_ERROR', 400);
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const scope = await this.access(tx, tenantId, actorId, null, null, false);
+      if (!scope.canViewAll) throw new DomainError('UNAUTHORIZED', 403);
+      if (input.action === 'reject' || input.action === 'approve') {
+        if (!input.proposalId) throw new DomainError('VALIDATION_ERROR', 400);
+        const list = await tx.priceList.findFirst({ where: { id: input.proposalId, tenantId } });
+        if (!list || !['DRAFT', 'PENDING', 'SCHEDULED'].includes(list.status)) throw new DomainError('VALIDATION_ERROR', 400);
+        const rateRow = await tx.exchangeRate.findFirst({ where: { tenantId, priceListId: list.id } });
+        if (input.action === 'reject') {
+          const reason = (input.reason ?? '').trim();
+          if (reason.length < 3) throw new DomainError('VALIDATION_ERROR', 400);
+          await tx.priceList.update({ where: { id: list.id }, data: { status: 'REJECTED', isActive: false, notes: reason, updatedBy: actorId } });
+          if (rateRow) await tx.exchangeRate.update({ where: { id: rateRow.id }, data: { status: 'REJECTED', reason } });
+          await this.audit(tx, { tenantId, actorId, action: 'price.rate_reject', entityType: 'PriceList', entityId: list.id, newJson: JSON.stringify({ reason }) });
+          return { status: 'REJECTED', proposalId: list.id, rows: [] as RatePreview[] };
+        }
+        const when = input.effectiveOn ? new Date(`${input.effectiveOn}T00:00:00Z`) : new Date();
+        const later = input.effectiveOn ? input.effectiveOn > khartoumDate() : false;
+        if (later) {
+          await tx.priceList.update({
+            where: { id: list.id },
+            data: { status: 'SCHEDULED', isActive: false, effectiveFrom: when, updatedBy: actorId },
+          });
+          return { status: 'SCHEDULED', proposalId: list.id, rows: [] as RatePreview[] };
+        }
+        await this.activateProposedList(tx, tenantId, list, actorId, when);
+        await this.audit(tx, { tenantId, actorId, action: 'price.rate_approve', entityType: 'PriceList', entityId: list.id, newJson: JSON.stringify({ version: list.versionNo, rate: cash(list.exchangeRateUsed ?? 0) }) });
+        return { status: 'ACTIVE', proposalId: list.id, rows: [] as RatePreview[] };
+      }
+      const approved = await tx.exchangeRate.findFirst({ where: { tenantId, status: 'APPROVED' }, orderBy: { notedAt: 'desc' } });
+      const oldRate = approved ? cash(approved.rate) : '0.00';
+      const active = await tx.priceList.findFirst({ where: { tenantId, scope: 'PHARMACY', status: 'ACTIVE', isActive: true } });
+      const products = await tx.product.findMany({ where: { tenantId, isDeleted: false }, orderBy: { nameAr: 'asc' } });
+      const currentPrices = active ? await tx.productPrice.findMany({ where: { tenantId, priceListId: active.id } }) : [];
+      const oldByProduct = new Map(currentPrices.map((row) => [row.productId, cash(row.amount)]));
+      const rows: RatePreview[] = [];
+      for (const product of products) {
+        const base = product.costUsd ? cash(product.costUsd) : '0.00';
+        const proposed = usdSellingPrice(base, nextRate);
+        if (!proposed && !oldByProduct.has(product.id)) continue;
+        const oldPrice = oldByProduct.get(product.id) ?? '0.00';
+        const newPrice = proposed ?? oldPrice;
+        rows.push({
+          productId: product.id,
+          sku: product.sku,
+          nameAr: product.nameAr,
+          nameEn: product.nameEn,
+          oldPrice,
+          newPrice,
+          changePct: priceChangePct(oldPrice, newPrice),
+          belowCost: cmpMoney(cash(product.costPrice), '0.00') > 0 && cmpMoney(newPrice, cash(product.costPrice)) < 0,
+        });
+      }
+      const changePct = priceChangePct(oldRate, nextRate);
+      if (input.action === 'preview') {
+        return { oldRate, newRate: nextRate, changePct, status: 'PREVIEW', rows };
+      }
+      const status = input.action === 'submit' ? 'PENDING' : 'DRAFT';
+      const listId = randomUUID();
+      const highest = await tx.priceList.aggregate({ where: { tenantId }, _max: { versionNo: true } });
+      const version = (highest._max.versionNo ?? 0) + 1;
+      await tx.priceList.create({
+        data: {
+          id: listId,
+          tenantId,
+          nameAr: active?.nameAr ?? 'قائمة السعر',
+          nameEn: active?.nameEn ?? 'Price list',
+          scope: 'PHARMACY',
+          listType: active?.listType ?? 'GENERAL',
+          status,
+          versionNo: version,
+          sourcePriceListId: active?.id ?? null,
+          exchangeRateUsed: nextRate,
+          isActive: false,
+          createdBy: actorId,
+        },
+      });
+      const priced = new Set<string>();
+      for (const row of rows) {
+        priced.add(row.productId);
+        await tx.productPrice.create({
+          data: { tenantId, priceListId: listId, productId: row.productId, amount: row.newPrice, createdBy: actorId },
+        });
+      }
+      for (const row of currentPrices) {
+        if (priced.has(row.productId)) continue;
+        await tx.productPrice.create({
+          data: { tenantId, priceListId: listId, productId: row.productId, amount: cash(row.amount), createdBy: actorId },
+        });
+      }
+      const rateId = randomUUID();
+      await tx.exchangeRate.create({
+        data: { id: rateId, tenantId, currency: 'USD', rate: nextRate, status, priceListId: listId, notedAt: new Date(), createdBy: actorId },
+      });
+      await this.audit(tx, { tenantId, actorId, action: 'price.rate_propose', entityType: 'PriceList', entityId: listId, newJson: JSON.stringify({ oldRate, newRate: nextRate, status, rows: rows.length }) });
+      return { oldRate, newRate: nextRate, changePct, status, proposalId: listId, rows };
     });
   }
 
@@ -2016,51 +2725,614 @@ export class OpsService {
       return scope.canViewAll;
     });
     if (!scopeOk) throw new DomainError('UNAUTHORIZED', 403);
-    const forms = new Set((await this.prisma.client.dosageForm.findMany()).map((row) => row.code));
-    const seen = new Set<string>();
     const errors: string[] = [];
-    let created = 0;
-    let updated = 0;
+    let requested = 0;
     for (const row of rows) {
-      if (!row.code || !row.nameAr || !row.nameEn || !row.genericName || !row.form) {
+      if (!row.nameAr || !row.nameEn || !row.genericName) {
         errors.push(row.code || '?');
         continue;
       }
-      if (!forms.has(row.form)) {
-        errors.push(`${row.code}:form`);
-        continue;
-      }
-      if (seen.has(row.code)) {
+      const existing = await this.prisma.client.globalCatalogItem.findFirst({
+        where: { OR: [{ code: row.code }, { nameEn: row.nameEn, genericName: row.genericName, strength: row.strength || '' }] },
+        select: { id: true },
+      });
+      if (existing) {
         errors.push(`${row.code}:duplicate`);
         continue;
       }
-      seen.add(row.code);
-      const gtin = row.gtin?.trim() ?? '';
-      const existing =
-        (await this.prisma.client.standardMedicine.findFirst({ where: { code: row.code } })) ??
-        (gtin ? await this.prisma.client.standardMedicine.findFirst({ where: { gtin } }) : null);
-      const data = {
-        nameAr: row.nameAr,
-        nameEn: row.nameEn,
-        genericName: row.genericName,
-        form: row.form,
-        strength: row.strength || '',
-        categoryAr: row.categoryAr || 'عام',
-        categoryEn: row.categoryEn || 'General',
-        gtin,
-        manufacturer: row.manufacturer ?? '',
-        ingredients: row.ingredients ?? row.genericName,
-        status: 'PUBLISHED',
-      };
-      if (existing) {
-        await this.prisma.client.standardMedicine.update({ where: { id: existing.id }, data });
-        updated += 1;
-      } else {
-        await this.prisma.client.standardMedicine.create({ data: { code: row.code, ...data } });
-        created += 1;
+      await this.prisma.client.newCatalogItemRequest.create({
+        data: {
+          tenantId,
+          requestedBy: actorId,
+          nameAr: row.nameAr,
+          nameEn: row.nameEn,
+          genericName: row.genericName,
+          manufacturer: row.manufacturer ?? '',
+          strength: row.strength || '',
+          packaging: row.form,
+          itemType: 'Medicine',
+          barcode: row.gtin ?? '',
+          note: row.ingredients ?? '',
+          status: 'PENDING',
+        },
+      });
+      requested += 1;
+    }
+    return { created: 0, updated: 0, requested, errors };
+  }
+
+  async saveGoodsReceipt(
+    tenantId: string,
+    branchHint: string | null,
+    actorId: string,
+    header: string | null,
+    input: GoodsReceiptInput,
+  ) {
+    try {
+      return await this.prisma.withTenant(tenantId, async (tx) => {
+        const scope = await this.access(tx, tenantId, actorId, branchHint, header, true);
+        const opening = Boolean(input.opening);
+        const override = Boolean(input.override);
+        if ((opening || override) && !scope.canManage) throw new DomainError('OPENING_FORBIDDEN', 403);
+        if (opening === Boolean(input.purchaseId)) throw new DomainError('NEED_PURCHASE', 400);
+        const invoice = (input.supplierInvoice ?? '').trim();
+        if (!opening && invoice.length < 1) throw new DomainError('NEED_INVOICE', 400);
+        const shelf = await this.shelfSettings(tx, tenantId);
+        const existing = await tx.goodsReceipt.findFirst({
+          where: { tenantId, clientKey: input.clientKey },
+          include: { lines: true },
+        });
+        if (existing?.status === 'POSTED') {
+          const quantity = existing.lines.reduce((sum, line) => sum + line.qty + line.bonusQty, 0);
+          const value = existing.lines.reduce((sum, line) => addMoney(sum, mulMoney(cash(line.unitCost), String(line.qty))), '0.00');
+          return { id: existing.id, docNo: existing.docNo, status: existing.status, quantity, value, warnings: [] as string[] };
+        }
+        const order = input.purchaseId
+          ? await tx.purchaseOrder.findFirst({
+              where: { id: input.purchaseId, tenantId, branchId: scope.writeBranchId },
+              include: { lines: true, supplier: true },
+            })
+          : null;
+        if (!opening && (!order || !['ORDERED', 'PARTIAL'].includes(order.status))) throw new DomainError('NOT_FOUND', 404);
+        const buckets: OrderBucket[] = (order?.lines ?? []).map((line) => ({
+          id: line.id,
+          productId: line.productId,
+          ordered: line.qty,
+          received: line.receivedQty,
+        }));
+        const warnings: string[] = [];
+        const ready: {
+          productId: string;
+          batchNo: string;
+          qty: number;
+          bonus: number;
+          unitCost: string;
+          foreignUnit: string;
+          rejectedQty: number;
+          sellPrice: string;
+          expiry: Date;
+          location: string;
+          condition: 'AVAILABLE' | 'REJECTED' | 'QUARANTINE' | 'DAMAGED';
+          manufacturedAt: string;
+          serialNo: string;
+          unitCode: string;
+          trackSerial: boolean;
+          purchaseLineId: string | null;
+        }[] = [];
+        for (const line of input.lines) {
+          const batchNo = manufacturerBatch(line.batchNo);
+          let product = line.productId
+            ? await tx.product.findFirst({ where: { id: line.productId, tenantId, isDeleted: false } })
+            : null;
+          if (!product && line.code) {
+            await ensureProducts(tx, tenantId, actorId, [line.code]);
+            product = await tx.product.findFirst({ where: { tenantId, sku: line.code, isDeleted: false } });
+          }
+          if (!product) throw new DomainError('NOT_FOUND', 404);
+          const condition = line.condition ?? 'AVAILABLE';
+          const bonus = line.bonusQty ?? 0;
+          if (condition === 'AVAILABLE') {
+            const warning = assertReceiptLine({
+              expiry: line.expiry,
+              manufacturedAt: line.manufacturedAt ?? '',
+              qty: line.qty,
+              bonusQty: bonus,
+              serial: line.serialNo ?? '',
+              trackSerial: product.trackSerial,
+              today: khartoumDate(),
+              warnMonths: shelf.warn,
+            });
+            if (warning) warnings.push(`${product.sku}:${warning}`);
+          } else if (!/^\d{4}-\d{2}-\d{2}/.test(line.expiry)) {
+            throw new DomainError('VALIDATION_ERROR', 400);
+          }
+          if (line.serialNo?.trim()) {
+            const duplicate = await tx.stockLot.findFirst({ where: { tenantId, serialNo: line.serialNo.trim() } });
+            if (duplicate) throw new DomainError('VALIDATION_ERROR', 400);
+          }
+          const pieces = line.qty + bonus;
+          const takes = order ? claimReceiptQty(buckets, product.id, pieces, override) : [];
+          if (cmpMoney(money(line.unitCost), '0.00') <= 0) throw new DomainError('VALIDATION_ERROR', 400);
+          if (line.pack) await this.rememberPack(tx, tenantId, actorId, product.id, line.pack);
+          const unitCost = pieceUnitCost(money(line.unitCost), line.pack ?? null);
+          ready.push({
+            productId: product.id,
+            batchNo,
+            qty: line.qty,
+            bonus,
+            unitCost,
+            foreignUnit: unitCost,
+            rejectedQty: line.rejectedQty ?? 0,
+            sellPrice: line.sellPrice ? money(line.sellPrice) : '',
+            expiry: new Date(line.expiry),
+            location: line.location,
+            condition,
+            manufacturedAt: line.manufacturedAt ?? '',
+            serialNo: line.serialNo?.trim() ?? '',
+            unitCode: line.unitCode || 'BASE',
+            trackSerial: product.trackSerial,
+            purchaseLineId: takes[0]?.id ?? null,
+          });
+        }
+        const currency = input.currency ?? 'SDG';
+        let snapshotRate = '1.00';
+        if (currency === 'USD') {
+          const approved = await tx.exchangeRate.findFirst({
+            where: { tenantId, status: 'APPROVED' },
+            orderBy: { notedAt: 'desc' },
+          });
+          if (!approved) throw new DomainError('VALIDATION_ERROR', 400);
+          snapshotRate = cash(approved.rate);
+        }
+        let costs: { sdgUnit: string; sdgTotal: string; foreignUnit: string }[];
+        try {
+          costs = allocateReceiptCosts(
+            ready.map((line) => ({ qty: line.qty, unitCost: line.unitCost })),
+            {
+              currency,
+              rate: snapshotRate,
+              discount: input.discount || '0.00',
+              tax: input.tax || '0.00',
+              charges: input.charges || '0.00',
+            },
+          );
+        } catch (error) {
+          if (error instanceof Error && (error.message === 'RATE' || error.message === 'COST' || error.message === 'QTY')) {
+            throw new DomainError('VALIDATION_ERROR', 400);
+          }
+          throw error;
+        }
+        ready.forEach((line, index) => {
+          line.foreignUnit = costs[index].foreignUnit;
+          line.unitCost = costs[index].sdgUnit;
+        });
+        const receiptId = existing?.id ?? randomUUID();
+        const docNo = existing?.docNo ?? `GR-${receiptId.slice(0, 8).toUpperCase()}`;
+        const receivedAt = existing?.receivedAt ?? new Date();
+        if (!existing) {
+          await tx.goodsReceipt.create({
+            data: {
+              id: receiptId,
+              tenantId,
+              branchId: scope.writeBranchId,
+              supplierId: order?.supplierId ?? null,
+              purchaseId: order?.id ?? null,
+              clientKey: input.clientKey,
+              docNo,
+              supplierInvoice: invoice,
+              currency,
+              exchangeRate: currency === 'USD' ? snapshotRate : null,
+              discountAmount: money(input.discount || '0.00'),
+              taxAmount: money(input.tax || '0.00'),
+              chargeAmount: money(input.charges || '0.00'),
+              status: 'DRAFT',
+              source: opening ? 'OPENING' : 'PROCUREMENT',
+              receivedAt,
+              createdBy: actorId,
+            },
+          });
+        } else {
+          await tx.goodsReceiptLine.deleteMany({ where: { tenantId, receiptId } });
+          await tx.goodsReceipt.update({
+            where: { id: receiptId },
+            data: {
+              supplierInvoice: invoice,
+              currency,
+              exchangeRate: currency === 'USD' ? snapshotRate : null,
+              discountAmount: money(input.discount || '0.00'),
+              taxAmount: money(input.tax || '0.00'),
+              chargeAmount: money(input.charges || '0.00'),
+              updatedBy: actorId,
+            },
+          });
+        }
+        let quantity = 0;
+        let value = '0.00';
+        for (const line of ready) {
+          await tx.goodsReceiptLine.create({
+            data: {
+              tenantId,
+              receiptId,
+              productId: line.productId,
+              purchaseLineId: line.purchaseLineId,
+              batchNo: line.batchNo,
+              qty: line.qty,
+              bonusQty: line.bonus,
+              unitCost: line.unitCost,
+              foreignUnitCost: line.foreignUnit,
+              currency,
+              exchangeRate: currency === 'USD' ? snapshotRate : null,
+              rejectedQty: line.rejectedQty,
+              sellPrice: line.sellPrice || null,
+              expiry: line.expiry,
+              location: line.location,
+              condition: line.condition,
+              manufacturedAt: line.manufacturedAt ? new Date(line.manufacturedAt) : null,
+              serialNo: line.serialNo || null,
+              unitCode: line.unitCode,
+              createdBy: actorId,
+            },
+          });
+          quantity += line.qty + line.bonus;
+          value = addMoney(value, mulMoney(line.unitCost, String(line.qty)));
+        }
+        if (!input.post) {
+          await this.audit(tx, {
+            tenantId,
+            actorId,
+            branchId: scope.writeBranchId,
+            action: 'receipt.draft',
+            entityType: 'GoodsReceipt',
+            entityId: receiptId,
+            newJson: JSON.stringify({ docNo, lines: ready.length }),
+          });
+          return { id: receiptId, docNo, status: 'DRAFT', quantity, value, warnings };
+        }
+        const postedLines = await tx.goodsReceiptLine.findMany({ where: { tenantId, receiptId } });
+        if (opening) {
+          const already = await tx.stockMovement.findFirst({ where: { tenantId, refType: 'RECEIPT', refId: receiptId } });
+          if (!already) {
+            for (const line of postedLines) {
+              const lotId = randomUUID();
+              const received = line.qty + line.bonusQty;
+              await tx.stockLot.create({
+                data: {
+                  id: lotId,
+                  tenantId,
+                  branchId: scope.writeBranchId,
+                  productId: line.productId,
+                  batchNo: line.batchNo,
+                  expiry: line.expiry,
+                  manufacturedAt: line.manufacturedAt,
+                  serialNo: line.serialNo,
+                  unitCode: line.unitCode,
+                  bonusQty: line.bonusQty,
+                  qtyBase: received,
+                  location: line.location,
+                  condition: line.condition,
+                  unitCost: line.unitCost,
+                  receiptLineId: line.id,
+                  createdBy: actorId,
+                },
+              });
+              await tx.stockMovement.create({
+                data: {
+                  tenantId,
+                  branchId: scope.writeBranchId,
+                  productId: line.productId,
+                  lotId,
+                  type: 'RECEIVE',
+                  qtyBase: received,
+                  note: docNo,
+                  refType: 'RECEIPT',
+                  refId: receiptId,
+                  createdBy: actorId,
+                },
+              });
+              await tx.goodsReceiptLine.update({ where: { id: line.id }, data: { postedQty: received } });
+              if (line.condition === 'AVAILABLE') {
+                await tx.product.update({
+                  where: { id: line.productId },
+                  data: { costPrice: line.unitCost },
+                });
+              }
+            }
+          }
+        } else {
+          for (const line of postedLines) {
+            if (line.condition !== 'AVAILABLE') continue;
+            await tx.product.update({
+              where: { id: line.productId },
+              data: { costPrice: line.unitCost },
+            });
+          }
+        }
+        if (order) {
+          for (const bucket of buckets) {
+            await tx.purchaseLine.update({ where: { id: bucket.id }, data: { receivedQty: bucket.received } });
+          }
+          const done = buckets.every((bucket) => bucket.received >= bucket.ordered);
+          await tx.purchaseOrder.update({
+            where: { id: order.id },
+            data: { status: done ? 'RECEIVED' : 'PARTIAL' },
+          });
+          await tx.supplier.update({
+            where: { id: order.supplierId },
+            data: { balance: addMoney(cash(order.supplier.balance), value) },
+          });
+          await this.postJournal(tx, tenantId, actorId, `استلام ${docNo}`, `Receipt ${docNo}`, [
+            { code: '1200', debit: value, credit: '0.00' },
+            { code: '2000', debit: '0.00', credit: value },
+          ]);
+        }
+        await tx.goodsReceipt.update({
+          where: { id: receiptId },
+          data: { status: 'POSTED', postedAt: new Date(), updatedBy: actorId },
+        });
+        await this.audit(tx, {
+          tenantId,
+          actorId,
+          branchId: scope.writeBranchId,
+          action: 'receipt.post',
+          entityType: 'GoodsReceipt',
+          entityId: receiptId,
+          newJson: JSON.stringify({ docNo, quantity, value, purchaseId: order?.id ?? null }),
+        });
+        return { id: receiptId, docNo, status: 'POSTED', quantity, value, warnings };
+      });
+    } catch (error) {
+      this.rethrow(error);
+    }
+  }
+
+  async pendingStock(tenantId: string, branchHint: string | null, actorId: string, header: string | null, clientKey: string | null) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const scope = await this.access(tx, tenantId, actorId, branchHint, header, true);
+      const entry = clientKey
+        ? await tx.inventoryEntry.findFirst({ where: { tenantId, clientKey }, include: { lines: true } })
+        : null;
+      return this.stockDesk(tx, tenantId, scope, actorId, entry);
+    });
+  }
+
+  async openInventoryEntry(tenantId: string, branchHint: string | null, actorId: string, header: string | null, clientKey: string) {
+    let last: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        return await this.prisma.withTenant(tenantId, async (tx) => {
+          const scope = await this.access(tx, tenantId, actorId, branchHint, header, true);
+          let entry = await tx.inventoryEntry.findFirst({ where: { tenantId, clientKey }, include: { lines: true } });
+          if (entry && entry.branchId !== scope.writeBranchId) throw new DomainError('UNAUTHORIZED', 403);
+          if (!entry) {
+            entry = await tx.inventoryEntry.create({
+              data: {
+                tenantId,
+                branchId: scope.writeBranchId,
+                clientKey,
+                docNo: await this.nextInventoryDoc(tx, tenantId),
+                status: 'DRAFT',
+                receivedAt: new Date(),
+                createdBy: actorId,
+              },
+              include: { lines: true },
+            });
+            await this.audit(tx, {
+              tenantId,
+              actorId,
+              branchId: scope.writeBranchId,
+              action: 'stock.open',
+              entityType: 'InventoryEntry',
+              entityId: entry.id,
+              newJson: JSON.stringify({ docNo: entry.docNo }),
+            });
+          }
+          return this.stockDesk(tx, tenantId, scope, actorId, entry);
+        });
+      } catch (error) {
+        last = error;
+        if (uniqueConflict(error) && attempt < 2) continue;
+        this.rethrow(error);
       }
     }
-    return { created, updated, errors };
+    this.rethrow(last);
+  }
+
+  async saveInventoryEntry(
+    tenantId: string,
+    branchHint: string | null,
+    actorId: string,
+    header: string | null,
+    input: InventoryPostInput,
+  ) {
+    let last: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        return await this.prisma.withTenant(tenantId, async (tx) => {
+          const scope = await this.access(tx, tenantId, actorId, branchHint, header, true);
+          const shelf = await this.shelfSettings(tx, tenantId);
+          let entry = await tx.inventoryEntry.findFirst({
+            where: { tenantId, clientKey: input.clientKey },
+            include: { lines: true },
+          });
+          if (entry?.status === 'POSTED') {
+            return {
+              id: entry.id,
+              docNo: entry.docNo,
+              status: entry.status,
+              quantity: entry.lines.reduce((sum, line) => sum + line.qty, 0),
+              warnings: [] as string[],
+            };
+          }
+          if (entry && entry.branchId !== scope.writeBranchId) throw new DomainError('UNAUTHORIZED', 403);
+          if (!entry) {
+            entry = await tx.inventoryEntry.create({
+              data: {
+                tenantId,
+                branchId: scope.writeBranchId,
+                clientKey: input.clientKey,
+                docNo: await this.nextInventoryDoc(tx, tenantId),
+                status: 'DRAFT',
+                receivedAt: new Date(),
+                createdBy: actorId,
+              },
+              include: { lines: true },
+            });
+          }
+          const places = await this.ensurePlaces(tx, tenantId, scope.writeBranchId, actorId);
+          const placeByCode = new Map(places.map((place) => [place.code, place]));
+          await tx.inventoryEntryLine.deleteMany({ where: { tenantId, entryId: entry.id } });
+          const warnings: string[] = [];
+          if (!input.post) {
+            for (const request of input.lines) {
+              if (!placeByCode.has(request.location)) throw new DomainError('VALIDATION_ERROR', 400);
+              const source = await tx.goodsReceiptLine.findFirst({ where: { id: request.receiptLineId, tenantId } });
+              if (!source) throw new DomainError('NOT_FOUND', 404);
+              await tx.inventoryEntryLine.create({
+                data: {
+                  tenantId,
+                  entryId: entry.id,
+                  receiptLineId: request.receiptLineId,
+                  qty: request.qty,
+                  location: request.location,
+                  createdBy: actorId,
+                },
+              });
+            }
+            await this.audit(tx, {
+              tenantId,
+              actorId,
+              branchId: scope.writeBranchId,
+              action: 'stock.draft',
+              entityType: 'InventoryEntry',
+              entityId: entry.id,
+              newJson: JSON.stringify({ docNo: entry.docNo, lines: input.lines.length }),
+            });
+            return {
+              id: entry.id,
+              docNo: entry.docNo,
+              status: 'DRAFT',
+              quantity: input.lines.reduce((sum, line) => sum + line.qty, 0),
+              warnings,
+            };
+          }
+          let quantity = 0;
+          let value = '0.00';
+          for (const request of input.lines) {
+            const place = placeByCode.get(request.location);
+            if (!place) throw new DomainError('VALIDATION_ERROR', 400);
+            const line = await tx.goodsReceiptLine.findFirst({
+              where: { id: request.receiptLineId, tenantId },
+              include: { product: { include: { category: true } }, receipt: { include: { purchase: true } } },
+            });
+            if (!line || line.receipt.branchId !== scope.writeBranchId) throw new DomainError('NOT_FOUND', 404);
+            const received = line.qty + line.bonusQty;
+            const candidate = {
+              poStatus: line.receipt.purchase?.status ?? 'CANCELLED',
+              receiptStatus: line.receipt.status,
+              source: line.receipt.source,
+              condition: line.condition,
+              expiry: line.expiry.toISOString(),
+              received,
+              posted: line.postedQty,
+            };
+            if (!canStockReceipt(candidate, khartoumDate())) throw new DomainError('NOT_FOUND', 404);
+            claimStockQty(received, line.postedQty, request.qty);
+            if (line.serialNo) {
+              const duplicate = await tx.stockLot.findFirst({ where: { tenantId, serialNo: line.serialNo } });
+              if (duplicate) throw new DomainError('VALIDATION_ERROR', 400);
+            }
+            const warning = assertReceiptLine({
+              expiry: line.expiry.toISOString(),
+              manufacturedAt: line.manufacturedAt ? line.manufacturedAt.toISOString() : '',
+              qty: request.qty,
+              bonusQty: 0,
+              serial: line.serialNo ?? '',
+              trackSerial: Boolean(line.product.trackSerial && line.serialNo),
+              today: khartoumDate(),
+              warnMonths: shelf.warn,
+            });
+            const hint = [line.product.nameAr, line.product.nameEn, line.product.form, line.product.strength, line.product.category.nameAr, line.product.category.nameEn].join(' ');
+            if (!placeCompatible(storageNeed(hint), request.location)) warnings.push(`${line.product.sku}:PLACE`);
+            if (warning) warnings.push(`${line.product.sku}:${warning}`);
+            const updated = await tx.goodsReceiptLine.updateMany({
+              where: { id: line.id, tenantId, postedQty: line.postedQty },
+              data: { postedQty: line.postedQty + request.qty },
+            });
+            if (updated.count !== 1) throw new DomainError('OVER_POST', 409);
+            const lotId = randomUUID();
+            await tx.stockLot.create({
+              data: {
+                id: lotId,
+                tenantId,
+                branchId: scope.writeBranchId,
+                productId: line.productId,
+                batchNo: line.batchNo,
+                expiry: line.expiry,
+                manufacturedAt: line.manufacturedAt,
+                serialNo: line.serialNo,
+                unitCode: line.unitCode,
+                bonusQty: 0,
+                qtyBase: request.qty,
+                location: place.nameAr,
+                condition: 'AVAILABLE',
+                unitCost: line.unitCost,
+                receiptLineId: line.id,
+                createdBy: actorId,
+              },
+            });
+            await tx.stockMovement.create({
+              data: {
+                tenantId,
+                branchId: scope.writeBranchId,
+                productId: line.productId,
+                lotId,
+                type: 'RECEIVE',
+                qtyBase: request.qty,
+                note: entry.docNo,
+                refType: 'INVENTORY',
+                refId: entry.id,
+                createdBy: actorId,
+              },
+            });
+            await tx.inventoryEntryLine.create({
+              data: {
+                tenantId,
+                entryId: entry.id,
+                receiptLineId: line.id,
+                qty: request.qty,
+                location: request.location,
+                createdBy: actorId,
+              },
+            });
+            await tx.product.update({
+              where: { id: line.productId },
+              data: { costPrice: line.unitCost },
+            });
+            quantity += request.qty;
+            value = addMoney(value, mulMoney(cash(line.unitCost), String(request.qty)));
+          }
+          await tx.inventoryEntry.update({
+            where: { id: entry.id },
+            data: { status: 'POSTED', postedAt: new Date(), updatedBy: actorId },
+          });
+          await this.audit(tx, {
+            tenantId,
+            actorId,
+            branchId: scope.writeBranchId,
+            action: 'stock.post',
+            entityType: 'InventoryEntry',
+            entityId: entry.id,
+            newJson: JSON.stringify({ docNo: entry.docNo, quantity, value }),
+          });
+          return { id: entry.id, docNo: entry.docNo, status: 'POSTED', quantity, warnings };
+        });
+      } catch (error) {
+        last = error;
+        if (uniqueConflict(error) && attempt < 2) continue;
+        this.rethrow(error);
+      }
+    }
+    this.rethrow(last);
   }
 
   async receiveStock(
@@ -2070,96 +3342,218 @@ export class OpsService {
     header: string | null,
     lines: ReceiveLine[],
   ) {
-    try {
-      return await this.prisma.withTenant(tenantId, async (tx) => {
-        const branchId = (await this.access(tx, tenantId, actorId, branchHint, header, true)).writeBranchId;
-        const shelf = await this.shelfSettings(tx, tenantId);
-        const warnings: string[] = [];
-        let quantity = 0;
-        let value = '0.00';
-        for (const line of lines) {
-          let product = line.productId
-            ? await tx.product.findFirst({ where: { id: line.productId, tenantId, isDeleted: false } })
-            : null;
-          if (!product && line.code) {
-            await ensureProducts(tx, tenantId, actorId, [line.code]);
-            product = await tx.product.findFirst({ where: { tenantId, sku: line.code, isDeleted: false } });
-          }
-          if (!product) throw new DomainError('NOT_FOUND', 404);
-          await tx.product.update({
-            where: { id: product.id },
-            data: {
-              costPrice: money(line.unitCost),
-              ...(line.sellPrice ? { sellPrice: money(line.sellPrice) } : {}),
-            },
-          });
-          const bonus = line.bonusQty ?? 0;
-          const warning = assertReceiptLine({
-            expiry: line.expiry,
-            manufacturedAt: line.manufacturedAt ?? '',
-            qty: line.qty,
-            bonusQty: bonus,
-            serial: line.serialNo ?? '',
-            trackSerial: product.trackSerial,
-            today: khartoumDate(),
-            warnMonths: shelf.warn,
-          });
-          if (line.serialNo?.trim()) {
-            const duplicate = await tx.stockLot.findFirst({ where: { tenantId, serialNo: line.serialNo.trim() } });
-            if (duplicate) throw new DomainError('VALIDATION_ERROR', 400);
-          }
-          if (warning) warnings.push(`${product.sku}:${warning}`);
-          const expiry = new Date(line.expiry);
-          const lotId = randomUUID();
-          const received = line.qty + bonus;
-          await tx.stockLot.create({
-            data: {
-              id: lotId,
-              tenantId,
-              branchId,
-              productId: product.id,
-              batchNo: line.batchNo,
-              expiry,
-              manufacturedAt: line.manufacturedAt ? new Date(line.manufacturedAt) : null,
-              serialNo: line.serialNo?.trim() || null,
-              unitCode: line.unitCode || 'BASE',
-              bonusQty: bonus,
-              qtyBase: received,
-              location: line.location,
-              createdBy: actorId,
-            },
-          });
-          await tx.stockMovement.create({
-            data: {
-              tenantId,
-              branchId,
-              productId: product.id,
-              lotId,
-              type: 'RECEIVE',
-              qtyBase: received,
-              note: line.batchNo,
-              refType: 'OPENING',
-              refId: product.id,
-              createdBy: actorId,
-            },
-          });
-          quantity += received;
-          value = addMoney(value, mulMoney(money(line.unitCost), String(received)));
-        }
-        await this.audit(tx, {
+    void tenantId;
+    void branchHint;
+    void actorId;
+    void header;
+    void lines;
+    throw new DomainError('NEED_PURCHASE', 400);
+  }
+
+  private async stockingSummary(tx: Tx, tenantId: string, branchId: string | null) {
+    const branch = branchId ? { branchId } : {};
+    const today = khartoumDate();
+    const [orders, receipts, movements, lots] = await Promise.all([
+      tx.purchaseOrder.findMany({ where: { tenantId, ...branch }, select: { status: true } }),
+      tx.goodsReceipt.findMany({
+        where: { tenantId, ...branch, source: 'PROCUREMENT' },
+        include: {
+          lines: { select: { qty: true, bonusQty: true, postedQty: true, condition: true, expiry: true } },
+          purchase: { select: { status: true } },
+        },
+      }),
+      tx.stockMovement.findMany({
+        where: { tenantId, ...branch, type: 'RECEIVE', refType: 'INVENTORY', createdAt: { gte: khartoumDayStart() } },
+        select: { productId: true, qtyBase: true },
+      }),
+      tx.stockLot.findMany({
+        where: { tenantId, ...branch },
+        select: { qtyBase: true, expiry: true, condition: true },
+      }),
+    ]);
+    const lines = receipts.flatMap((receipt) =>
+      receipt.lines.map((line) => ({
+        poStatus: receipt.purchase?.status ?? 'CANCELLED',
+        receiptStatus: receipt.status,
+        source: 'PROCUREMENT',
+        condition: line.condition,
+        expiry: line.expiry.toISOString(),
+        received: line.qty + line.bonusQty,
+        posted: line.postedQty,
+      })),
+    );
+    const availableQty = lots.reduce(
+      (sum, lot) =>
+        sum + (isSellableLot({ qtyBase: lot.qtyBase, expiry: lot.expiry.toISOString(), condition: lot.condition }, today) ? lot.qtyBase : 0),
+      0,
+    );
+    const newlyStocked = new Set(movements.filter((row) => row.qtyBase > 0).map((row) => row.productId)).size;
+    return { ...summarizeStocking({ orders, lines, today }), availableQty, newlyStocked };
+  }
+
+  private async ensurePlaces(tx: Tx, tenantId: string, branchId: string, actorId: string) {
+    const found = await tx.storageLocation.findMany({ where: { tenantId, branchId, isDeleted: false }, orderBy: { code: 'asc' } });
+    if (found.length > 0) return found;
+    for (const place of STOCK_PLACES) {
+      await tx.storageLocation.create({
+        data: {
           tenantId,
-          actorId,
           branchId,
-          action: 'stock.receive',
-          entityType: 'StockMovement',
-          entityId: branchId,
-          newJson: JSON.stringify({ lines: lines.length, quantity }),
-        });
-        return { lines: lines.length, quantity, value, warnings };
+          code: place.code,
+          kind: place.kind,
+          nameAr: place.nameAr,
+          nameEn: place.nameEn,
+          createdBy: actorId,
+        },
       });
-    } catch (error) {
-      this.rethrow(error);
     }
+    return tx.storageLocation.findMany({ where: { tenantId, branchId, isDeleted: false }, orderBy: { code: 'asc' } });
+  }
+
+  private async nextInventoryDoc(tx: Tx, tenantId: string): Promise<string> {
+    const year = Number(khartoumDate().slice(0, 4));
+    const prefix = `INV-${year}-`;
+    await tx.$queryRaw`
+      SELECT id FROM dbo.InventoryEntries WITH (UPDLOCK, HOLDLOCK)
+      WHERE tenantId = CAST(${tenantId} AS uniqueidentifier) AND docNo LIKE ${`${prefix}%`}
+    `;
+    const rows = await tx.inventoryEntry.findMany({
+      where: { tenantId, docNo: { startsWith: prefix } },
+      select: { docNo: true },
+    });
+    let max = 0;
+    for (const row of rows) {
+      const seq = Number(row.docNo.slice(prefix.length));
+      if (Number.isInteger(seq) && seq > max) max = seq;
+    }
+    return inventoryDocNo(year, max + 1);
+  }
+
+  private async stockDesk(
+    tx: Tx,
+    tenantId: string,
+    scope: { writeBranchId: string; branches: { id: string; nameAr: string; nameEn: string | null }[] },
+    actorId: string,
+    entry: { id: string; docNo: string; status: string; lines: { receiptLineId: string; qty: number; location: string }[] } | null,
+  ) {
+    const branchId = scope.writeBranchId;
+    const today = khartoumDate();
+    const [places, user, receipts, lots, stocking] = await Promise.all([
+      this.ensurePlaces(tx, tenantId, branchId, actorId),
+      tx.user.findFirst({ where: { id: actorId, tenantId }, select: { displayName: true } }),
+      tx.goodsReceipt.findMany({
+        where: { tenantId, branchId, source: 'PROCUREMENT', status: 'POSTED' },
+        include: {
+          supplier: true,
+          purchase: { select: { status: true, docNo: true } },
+          lines: { include: { product: { include: { category: true } } } },
+        },
+      }),
+      tx.stockLot.findMany({
+        where: { tenantId, branchId },
+        orderBy: { createdAt: 'desc' },
+        select: { productId: true, location: true },
+      }),
+      this.stockingSummary(tx, tenantId, branchId),
+    ]);
+    const previous = new Map<string, string>();
+    for (const lot of lots) {
+      if (!previous.has(lot.productId)) previous.set(lot.productId, lot.location);
+    }
+    const branch = scope.branches.find((row) => row.id === branchId);
+    const lines = [];
+    for (const receipt of receipts) {
+      for (const line of receipt.lines) {
+        const received = line.qty + line.bonusQty;
+        const candidate = {
+          poStatus: receipt.purchase?.status ?? 'CANCELLED',
+          receiptStatus: receipt.status,
+          source: receipt.source,
+          condition: line.condition,
+          expiry: line.expiry.toISOString(),
+          received,
+          posted: line.postedQty,
+        };
+        if (!canStockReceipt(candidate, today)) continue;
+        const hint = [
+          line.product.nameAr,
+          line.product.nameEn,
+          line.product.genericName,
+          line.product.form,
+          line.product.strength,
+          line.product.category.nameAr,
+          line.product.category.nameEn,
+          line.location,
+        ].join(' ');
+        lines.push({
+          receiptLineId: line.id,
+          productId: line.productId,
+          sku: line.product.sku,
+          nameAr: line.product.nameAr,
+          nameEn: line.product.nameEn,
+          genericName: line.product.genericName,
+          strength: line.product.strength,
+          form: line.product.form,
+          pack: line.unitCode,
+          barcode: line.product.gtin ?? '',
+          categoryAr: line.product.category.nameAr,
+          categoryEn: line.product.category.nameEn,
+          supplierAr: receipt.supplier?.nameAr ?? '',
+          supplierEn: receipt.supplier?.nameEn ?? '',
+          purchaseDoc: receipt.purchase?.docNo ?? '',
+          receiptDoc: receipt.docNo,
+          batchNo: line.batchNo,
+          expiry: line.expiry.toISOString().slice(0, 10),
+          receivedQty: received,
+          postedQty: line.postedQty,
+          available: received - line.postedQty,
+          unitCost: cash(line.unitCost),
+          sellPrice: line.sellPrice ? cash(line.sellPrice) : cash(line.product.sellPrice),
+          location: suggestPlace(hint, previous.get(line.productId) || normalizePlace(line.location)),
+          storage: storageNeed(hint),
+          receivedAt: receipt.receivedAt.toISOString(),
+        });
+      }
+    }
+    lines.sort((left, right) => left.nameAr.localeCompare(right.nameAr, 'ar') || left.batchNo.localeCompare(right.batchNo));
+    return {
+      id: entry?.id ?? null,
+      docNo: entry?.docNo ?? '',
+      status: entry?.status ?? 'DRAFT',
+      date: today,
+      branchAr: branch?.nameAr ?? '',
+      branchEn: branch?.nameEn ?? branch?.nameAr ?? '',
+      receiver: user?.displayName ?? '',
+      locations: places.map((place) => ({ code: place.code, kind: place.kind, nameAr: place.nameAr, nameEn: place.nameEn })),
+      lines,
+      selected: (entry?.lines ?? []).map((line) => ({ receiptLineId: line.receiptLineId, qty: line.qty, location: line.location })),
+      stocking,
+    };
+  }
+
+  private async itemPacks(tx: Tx, tenantId: string, productIds: string[]): Promise<Map<string, ItemPack>> {
+    const map = new Map<string, ItemPack>();
+    if (productIds.length === 0) return map;
+    const rows = await tx.pharmacySetting.findMany({
+      where: { tenantId, key: { in: productIds.map((id) => `pack:${id}`) } },
+    });
+    for (const row of rows) {
+      const pack = parseItemPack(row.valueEn);
+      if (pack) map.set(row.key.slice(5), pack);
+    }
+    return map;
+  }
+
+  private async rememberPack(tx: Tx, tenantId: string, actorId: string, productId: string, pack: ItemPack): Promise<void> {
+    if (piecesInContainer(pack) <= 1 && saleChoices(pack).length < 2) return;
+    const json = JSON.stringify({ outer: pack.outer, inner: pack.inner, perBox: pack.perBox, perInner: pack.perInner });
+    const key = `pack:${productId}`;
+    const current = await tx.pharmacySetting.findFirst({ where: { tenantId, key } });
+    if (!current) {
+      await tx.pharmacySetting.create({ data: { tenantId, key, valueAr: json, valueEn: json, createdBy: actorId } });
+      return;
+    }
+    await tx.pharmacySetting.update({ where: { id: current.id }, data: { valueAr: json, valueEn: json, updatedBy: actorId } });
   }
 
   private async shelfSettings(tx: Tx, tenantId: string): Promise<{ life: number; warn: number }> {
@@ -2202,12 +3596,32 @@ export class OpsService {
     });
   }
 
-  requestCatalogItem(
+  async requestCatalogItem(
     tenantId: string,
     actorId: string,
     branchId: string | null,
-    input: { nameAr: string; nameEn: string; genericName: string; barcode: string; note: string },
+    input: {
+      nameAr: string;
+      nameEn: string;
+      genericName: string;
+      barcode: string;
+      note: string;
+      manufacturer?: string;
+      strength?: string;
+      packaging?: string;
+      itemKind?: string;
+      itemType?: string;
+    },
   ) {
+    const match = await findCommercialDuplicate(this.prisma.client, {
+      nameEn: input.nameEn,
+      genericName: input.genericName,
+      strength: input.strength ?? '',
+      dosageForm: '',
+      manufacturer: input.manufacturer ?? '',
+      barcode: input.barcode,
+    });
+    if (match) throw new DomainError('DUPLICATE_PRODUCT', 409, { fields: { nameEn: 'duplicate', matchId: match.id, matchCode: match.code } });
     return this.prisma.client.newCatalogItemRequest.create({
       data: {
         tenantId,
@@ -2218,6 +3632,11 @@ export class OpsService {
         genericName: input.genericName,
         barcode: input.barcode,
         note: input.note,
+        manufacturer: input.manufacturer ?? '',
+        strength: input.strength ?? '',
+        packaging: input.packaging ?? '',
+        itemKind: input.itemKind === 'GENERIC' ? 'GENERIC' : 'BRAND',
+        itemType: input.itemType || 'Medicine',
         status: 'PENDING',
       },
       select: { id: true, status: true },
@@ -2234,12 +3653,15 @@ export class OpsService {
         error.message === 'QTY' ||
         error.message === 'EXPIRED' ||
         error.message === 'DATE_ORDER' ||
-        error.message === 'SERIAL')
+        error.message === 'SERIAL' ||
+        error.message === 'OVER_RECEIVE' ||
+        error.message === 'OVER_POST' ||
+        error.message === 'NOT_ON_ORDER' ||
+        error.message === 'NEED_BATCH')
     ) {
-      const status = error.message === 'STOCK_SHORT' ? 409 : 400;
-      const code = error.message === 'QTY' || error.message === 'EXPIRED' || error.message === 'DATE_ORDER' || error.message === 'SERIAL'
-        ? 'VALIDATION_ERROR'
-        : error.message;
+      const status = error.message === 'STOCK_SHORT' || error.message === 'OVER_POST' ? 409 : 400;
+      const code =
+        error.message === 'QTY' || error.message === 'DATE_ORDER' || error.message === 'SERIAL' ? 'VALIDATION_ERROR' : error.message;
       throw new DomainError(code, status);
     }
     throw error;

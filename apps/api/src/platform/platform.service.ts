@@ -8,11 +8,21 @@ import { PasswordService } from '../auth/password.service';
 import { provisionPharmacy } from '../auth/provision';
 import { APP_CONFIG, type AppConfig } from '../config';
 import { DomainError } from '../http/domain-error';
+import { nextTenantAccountCode } from '../auth/account-code';
 import { takenField } from '../http/field-errors';
 import { logger } from '../logger';
 import { PrismaService } from '../prisma/prisma.service';
 import { MEDICINE_ENRICH, MEDICINE_LIBRARY, type LibraryMedicine } from './medicine-library';
 import { plainMedicineName } from '../ops/medicine-name';
+import { parseCsv } from '../ops/ops.logic';
+import {
+  assertUniqueProduct,
+  findCommercialDuplicate,
+  globalDuplicateReport,
+  indexCatalogItem,
+  reindexMissing,
+  writeCatalogRevision,
+} from '../catalog/global-library';
 import {
   assertRequestStep,
   canActivateTenant,
@@ -20,6 +30,7 @@ import {
   catalogPushPatch,
   isBillingCycle,
   licenseNeedsAlert,
+  systemHealthCounts,
   mergeLimitPrices,
   planPrices,
   subscriptionCharge,
@@ -55,10 +66,12 @@ export class PlatformService {
     @Inject(APP_CONFIG) private readonly config: AppConfig,
   ) {}
 
-  async authenticate(email: string, password: string): Promise<{ id: string; displayName: string; roleCode: string }> {
-    const user = await this.prisma.client.platformUser.findUnique({ where: { email }, include: { role: true } });
+  async authenticate(phone: string, password: string): Promise<{ id: string; displayName: string; roleCode: string }> {
+    const user = await this.prisma.client.platformUser.findFirst({ where: { phone }, include: { role: true } });
     const ok = await this.passwords.verify(user?.passwordHash ?? this.passwords.dummyHash, password);
-    if (!user || !ok || !user.isActive) throw new DomainError('AUTH_INVALID_CREDENTIALS', 401);
+    if (!user || !ok || !user.isActive || user.role.code !== 'SUPER_ADMIN') {
+      throw new DomainError('AUTH_INVALID_CREDENTIALS', 401);
+    }
     await this.prisma.client.platformUser.update({ where: { id: user.id }, data: { lastLoginAt: new Date(), failedLogins: 0 } });
     return { id: user.id, displayName: user.displayName, roleCode: user.role.code };
   }
@@ -82,21 +95,33 @@ export class PlatformService {
     void actor;
     const now = new Date();
     const soon = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
-    const [tenants, requests, docs, invoices, items, licenses, subs, plans] = await Promise.all([
-      this.prisma.client.tenant.findMany({ select: { id: true, status: true, branchLimit: true } }),
+    const [tenants, requests, docs, invoices, items, licenses, subs, plans, rejectedProofs] = await Promise.all([
+      this.prisma.client.tenant.findMany({ select: { id: true, status: true, branchLimit: true, readOnly: true } }),
       this.prisma.client.subscriptionRequest.count({
         where: { status: { in: ['SUBMITTED', 'UNDER_REVIEW', 'NEED_MORE_INFO', 'VERIFIED'] } },
       }),
       this.prisma.client.verificationDocument.count({ where: { status: 'PENDING' } }),
-      this.prisma.client.subscriptionInvoice.findMany({ where: { status: 'ISSUED', dueAt: { lt: now } } }),
+      this.prisma.client.subscriptionInvoice.findMany({ select: { status: true, dueAt: true, tenantId: true } }),
       this.prisma.client.newCatalogItemRequest.count({ where: { status: 'PENDING' } }),
       this.prisma.client.partnerLicense.findMany({ where: { expiresOn: { lte: soon } }, include: { partner: true } }),
-      this.prisma.client.subscription.findMany({ where: { status: 'ACTIVE' } }),
+      this.prisma.client.subscription.findMany(),
       this.prisma.client.plan.findMany(),
+      this.prisma.client.paymentProof.count({ where: { status: 'REJECTED' } }),
     ]);
     const planByCode = new Map(plans.map((plan) => [plan.code, plan]));
+    const today = now.toISOString().slice(0, 10);
+    const systemHealth = systemHealthCounts({
+      tenants,
+      subscriptions: subs.map((row) => ({
+        status: row.status,
+        endsOn: (row.currentPeriodEnd ?? row.trialEndsAt)?.toISOString().slice(0, 10) ?? null,
+      })),
+      invoices: invoices.map((row) => ({ status: row.status, dueOn: row.dueAt.toISOString().slice(0, 10) })),
+      rejectedProofs,
+      today,
+    });
     let mrr = '0.00';
-    for (const sub of subs) {
+    for (const sub of subs.filter((row) => row.status === 'ACTIVE')) {
       const plan = planByCode.get(sub.planCode);
       const tenant = tenants.find((row) => row.id === sub.tenantId);
       if (!plan || !tenant) continue;
@@ -109,7 +134,8 @@ export class PlatformService {
       pendingRequests: requests,
       pendingVerification: docs,
       suspendedTenants: tenants.filter((row) => row.status === 'SUSPENDED').length,
-      overdueInvoices: invoices.length,
+      overdueInvoices: systemHealth.overdueInvoices,
+      systemHealth,
       monthlyRecurringRevenue: mrr,
       pendingItems: items,
       expiringPartners: licenses.map((row) => ({
@@ -126,7 +152,14 @@ export class PlatformService {
     const where = {
       ...(query.status ? { status: query.status } : {}),
       ...(query.q
-        ? { OR: [{ tradeNameAr: { contains: query.q } }, { tradeNameEn: { contains: query.q } }, { email: { contains: query.q } }] }
+        ? {
+            OR: [
+              { tradeNameAr: { contains: query.q } },
+              { tradeNameEn: { contains: query.q } },
+              { email: { contains: query.q } },
+              { accountCode: { contains: query.q } },
+            ],
+          }
         : {}),
     };
     const [total, rows] = await Promise.all([
@@ -148,6 +181,7 @@ export class PlatformService {
         const sub = subs.find((row) => row.tenantId === tenant.id);
         return {
           id: tenant.id,
+          accountCode: tenant.accountCode,
           tradeNameAr: tenant.tradeNameAr,
           tradeNameEn: tenant.tradeNameEn,
           type: tenant.type,
@@ -184,6 +218,7 @@ export class PlatformService {
     ]);
     return {
       id: tenant.id,
+      accountCode: tenant.accountCode,
       tradeNameAr: tenant.tradeNameAr,
       tradeNameEn: tenant.tradeNameEn,
       type: tenant.type,
@@ -230,7 +265,7 @@ export class PlatformService {
   ) {
     allow(actor, 'tenant.approve');
     const passwordHash = await this.passwords.hash(input.password);
-    let created: { tenantId: string };
+    let created: { tenantId: string; accountCode: string };
     try {
       created = await this.prisma.client.$transaction(async (tx) => {
         try {
@@ -267,7 +302,7 @@ export class PlatformService {
       branchCount: input.branchCount,
       management: input.management,
     });
-    return { tenantId: created.tenantId, email: input.email };
+    return { tenantId: created.tenantId, accountCode: created.accountCode, email: input.email };
   }
 
   async listPendingSignups(actor: PlatformActor) {
@@ -339,9 +374,33 @@ export class PlatformService {
     const tenant = await this.mustTenant(id);
     const base = tenant.trialEndsAt && tenant.trialEndsAt > new Date() ? tenant.trialEndsAt : new Date();
     const trialEndsAt = new Date(base.getTime() + days * 24 * 60 * 60 * 1000);
-    await this.prisma.client.tenant.update({ where: { id }, data: { trialEndsAt, status: 'TRIAL' } });
+    await this.prisma.client.tenant.update({ where: { id }, data: { trialEndsAt, status: 'TRIAL', readOnly: false } });
+    const current = await this.prisma.client.subscription.findFirst({ where: { tenantId: id }, orderBy: { createdAt: 'desc' } });
+    if (current) await this.prisma.client.subscription.update({ where: { id: current.id }, data: { status: 'TRIAL', trialEndsAt } });
     await this.audit(actor.id, 'tenant.trial', 'Tenant', id, reason, { days });
     return { trialEndsAt: trialEndsAt.toISOString() };
+  }
+
+  async activateStandard(actor: PlatformActor, id: string, reason: string) {
+    allow(actor, 'tenant.approve');
+    await this.mustTenant(id);
+    await this.prisma.client.tenant.update({ where: { id }, data: { status: 'ACTIVE', readOnly: false } });
+    const current = await this.prisma.client.subscription.findFirst({ where: { tenantId: id }, orderBy: { createdAt: 'desc' } });
+    if (current) await this.prisma.client.subscription.update({ where: { id: current.id }, data: { status: 'ACTIVE' } });
+    await this.audit(actor.id, 'tenant.standard', 'Tenant', id, reason);
+    return { status: 'ACTIVE' };
+  }
+
+  async cancelTrial(actor: PlatformActor, id: string, reason: string) {
+    allow(actor, 'tenant.approve');
+    const tenant = await this.mustTenant(id);
+    if (tenant.status !== 'TRIAL') throw new DomainError('REQUEST_STEP', 409);
+    const ended = new Date();
+    await this.prisma.client.tenant.update({ where: { id }, data: { status: 'SUSPENDED', readOnly: true, trialEndsAt: ended } });
+    const current = await this.prisma.client.subscription.findFirst({ where: { tenantId: id }, orderBy: { createdAt: 'desc' } });
+    if (current && current.status === 'TRIAL') await this.prisma.client.subscription.update({ where: { id: current.id }, data: { status: 'CANCELLED', trialEndsAt: ended } });
+    await this.audit(actor.id, 'tenant.trial_cancel', 'Tenant', id, reason);
+    return { status: 'SUSPENDED' };
   }
 
   async changePlan(actor: PlatformActor, id: string, planCode: string, reason: string) {
@@ -414,15 +473,19 @@ export class PlatformService {
     allow(actor, 'user.manage');
     const password = randomBytes(12).toString('base64url');
     const passwordHash = await this.passwords.hash(password);
+    const phone = input.phone.trim();
+    const email = input.email.trim();
     const userId = await this.prisma.withTenant(tenantId, async (tx) => {
       const role = await tx.role.findFirst({ where: { tenantId, code: 'OWNER' } });
       const branch = await tx.branch.findFirst({ where: { tenantId, id: input.branchId, isDeleted: false } });
       if (!role || !branch) throw new DomainError('NOT_FOUND', 404);
+      const samePhone = await tx.user.findFirst({ where: { tenantId, phone, isDeleted: false } });
+      if (samePhone) throw new DomainError('VALIDATION_ERROR', 409, { fields: { phone: 'taken' } });
       const user = await tx.user.create({
         data: {
           tenantId,
-          email: input.email,
-          phone: input.phone || null,
+          email: email || null,
+          phone,
           displayName: input.displayName,
           passwordHash,
           createdBy: null,
@@ -437,11 +500,13 @@ export class PlatformService {
       if (field) throw new DomainError('VALIDATION_ERROR', 409, { fields: { [field]: 'taken' } });
       throw error;
     });
-    await this.prisma.client.tenantAdminInvite.create({
-      data: { tenantId, email: input.email, displayName: input.displayName, status: 'CREATED' },
-    });
+    if (email) {
+      await this.prisma.client.tenantAdminInvite.create({
+        data: { tenantId, email, displayName: input.displayName, status: 'CREATED' },
+      });
+    }
     await this.audit(actor.id, 'tenant.create_admin', 'User', userId, '', { tenantId });
-    return { userId, password };
+    return { userId, password, phone };
   }
 
   async setReadOnly(actor: PlatformActor, id: string, readOnly: boolean, reason: string) {
@@ -483,6 +548,7 @@ export class PlatformService {
   async submitRequest(input: RequestInput) {
     const plan = await this.prisma.client.plan.findUnique({ where: { code: input.planCode } });
     if (!plan || !plan.isActive) throw new DomainError('VALIDATION_ERROR', 400);
+    const pharmacistLicense = input.pharmacistLicense.trim();
     const request = await this.prisma.client.subscriptionRequest.create({
       data: {
         status: 'SUBMITTED',
@@ -492,11 +558,13 @@ export class PlatformService {
         ownerPhone: input.ownerPhone,
         ownerEmail: input.ownerEmail,
         pharmacistName: input.pharmacistName,
-        pharmacistLicense: input.pharmacistLicense,
+        pharmacistLicense: pharmacistLicense || input.pharmacyLicense,
         pharmacyLicense: input.pharmacyLicense,
         stateName: input.stateName,
         city: input.city,
         addressLine: input.addressLine,
+        latitude: input.latitude == null ? null : input.latitude.toFixed(6),
+        longitude: input.longitude == null ? null : input.longitude.toFixed(6),
         planCode: input.planCode,
         branchCount: input.branchCount,
         userCount: input.userCount,
@@ -504,28 +572,29 @@ export class PlatformService {
         note: input.note,
       },
     });
-    await this.prisma.client.verificationDocument.createMany({
-      data: [
-        {
-          requestId: request.id,
-          kind: 'PHARMACY_LICENSE',
-          licenseNumber: input.pharmacyLicense,
-          status: 'PENDING',
-          fileName: input.pharmacyFileName,
-          content: input.pharmacyFile || null,
-          expiresOn: input.pharmacyExpiry ? new Date(input.pharmacyExpiry) : null,
-        },
-        {
-          requestId: request.id,
-          kind: 'PHARMACIST_LICENSE',
-          licenseNumber: input.pharmacistLicense,
-          status: 'PENDING',
-          fileName: input.pharmacistFileName,
-          content: input.pharmacistFile || null,
-          expiresOn: input.pharmacistExpiry ? new Date(input.pharmacistExpiry) : null,
-        },
-      ],
-    });
+    const documents = [
+      {
+        requestId: request.id,
+        kind: 'PHARMACY_LICENSE',
+        licenseNumber: input.pharmacyLicense,
+        status: 'PENDING',
+        fileName: input.pharmacyFileName,
+        content: input.pharmacyFile || null,
+        expiresOn: input.pharmacyExpiry ? new Date(input.pharmacyExpiry) : null,
+      },
+    ];
+    if (pharmacistLicense) {
+      documents.push({
+        requestId: request.id,
+        kind: 'PHARMACIST_LICENSE',
+        licenseNumber: pharmacistLicense,
+        status: 'PENDING',
+        fileName: input.pharmacistFileName,
+        content: input.pharmacistFile || null,
+        expiresOn: input.pharmacistExpiry ? new Date(input.pharmacistExpiry) : null,
+      });
+    }
+    await this.prisma.client.verificationDocument.createMany({ data: documents });
     const prices = planPrices({ monthlyPrice: dec(plan.monthlyPrice), yearlyPrice: dec(plan.yearlyPrice), limits: plan.limits });
     const billingCycle = isBillingCycle(input.billingCycle) ? input.billingCycle : 'MONTHLY';
     const amount = subscriptionCharge(
@@ -535,7 +604,90 @@ export class PlatformService {
       input.branchCount,
     );
     await this.audit(null, 'request.submit', 'SubscriptionRequest', request.id, '', { billingCycle, amount });
-    return { id: request.id, status: request.status };
+    if (!input.openTrial) return { id: request.id, status: request.status };
+    const password = randomBytes(12).toString('base64url');
+    const passwordHash = await this.passwords.hash(password);
+    const trialEndsAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
+    try {
+      const created = await this.prisma.client.$transaction(async (tx) => {
+        try {
+          const result = await provisionPharmacy(tx, {
+            tradeNameAr: input.tradeNameAr,
+            tradeNameEn: input.tradeNameEn,
+            phone: input.ownerPhone,
+            email: input.ownerEmail,
+            displayName: input.ownerName,
+            passwordHash,
+            branchCount: input.branchCount,
+            management: input.branchCount > 1 ? 'SHARED' : 'INDEPENDENT',
+            branchNameAr: 'الفرع الرئيسي',
+            branchNameEn: 'Main branch',
+            verificationStatus: 'VALID',
+          });
+          await tx.tenant.update({
+            where: { id: result.tenantId },
+            data: {
+              ownerName: input.ownerName,
+              addressLine: `${input.stateName} - ${input.city} - ${input.addressLine}`,
+              latitude: input.latitude == null ? null : input.latitude.toFixed(6),
+              longitude: input.longitude == null ? null : input.longitude.toFixed(6),
+              pharmacistName: input.pharmacistName,
+              pharmacistLicense: pharmacistLicense || input.pharmacyLicense,
+              licenseNumber: input.pharmacyLicense,
+              verificationStatus: 'VALID',
+              status: 'TRIAL',
+              readOnly: false,
+              featureFlags: plan.features,
+              trialEndsAt,
+            },
+          });
+          await tx.branch.update({
+            where: { id: result.branchId },
+            data: {
+              state: input.stateName,
+              city: input.city,
+              addressLine: input.addressLine,
+              latitude: input.latitude == null ? null : input.latitude.toFixed(6),
+              longitude: input.longitude == null ? null : input.longitude.toFixed(6),
+            },
+          });
+          const subscription = await tx.subscription.create({
+            data: { tenantId: result.tenantId, planCode: plan.code, status: 'TRIAL', cycle: billingCycle, trialEndsAt },
+          });
+          await tx.subscriptionInvoice.create({
+            data: {
+              tenantId: result.tenantId,
+              subscriptionId: subscription.id,
+              amount,
+              status: 'ISSUED',
+              dueAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
+            },
+          });
+          await tx.verificationDocument.updateMany({ where: { requestId: request.id }, data: { tenantId: result.tenantId } });
+          await tx.subscriptionRequest.update({
+            where: { id: request.id },
+            data: { status: 'TENANT_CREATED', tenantId: result.tenantId, updatedAt: new Date() },
+          });
+          return result;
+        } finally {
+          try {
+            await tx.$executeRaw`EXEC sp_set_session_context @key = N'TenantId', @value = NULL, @read_only = 0`;
+          } catch (error) {
+            logger.warn({ err: error }, 'failed to clear tenant session context');
+          }
+        }
+      }, { maxWait: 20_000, timeout: 60_000 });
+      await this.audit(null, 'request.create_tenant', 'Tenant', created.tenantId, '14-day trial', { requestId: request.id });
+      return { id: request.id, status: 'TENANT_CREATED', accountCode: created.accountCode, phone: input.ownerPhone, password, trialDays: 14 };
+    } catch (error) {
+      await this.prisma.client.verificationDocument.deleteMany({ where: { requestId: request.id } });
+      await this.prisma.client.subscriptionRequest.delete({ where: { id: request.id } }).catch(() => undefined);
+      const field = takenField(error);
+      if (field === 'phone') throw new DomainError('VALIDATION_ERROR', 409, { fields: { ownerPhone: 'taken' } });
+      if (field === 'email') throw new DomainError('VALIDATION_ERROR', 409, { fields: { ownerEmail: 'taken' } });
+      logger.error({ err: error }, 'trial signup failed');
+      throw error;
+    }
   }
 
   async listRequests(actor: PlatformActor, status: string | undefined) {
@@ -565,12 +717,16 @@ export class PlatformService {
     if (!row) throw new DomainError('NOT_FOUND', 404);
     const documents = await this.prisma.client.verificationDocument.findMany({ where: { requestId: id } });
     const quote = await this.submittedQuote(id);
+    const nextAccountCode = row.status === 'APPROVED'
+      ? await this.prisma.client.$transaction((tx) => nextTenantAccountCode(tx))
+      : '';
     return {
       ...row,
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt?.toISOString() ?? null,
       billingCycle: quote.billingCycle,
       quotedAmount: quote.amount,
+      nextAccountCode,
       documents: documents.map(publicDoc),
     };
   }
@@ -625,7 +781,7 @@ export class PlatformService {
     return { fileName: doc.fileName, content: doc.content ?? '' };
   }
 
-  async createTenant(actor: PlatformActor, id: string, overrideReason: string) {
+  async createTenant(actor: PlatformActor, id: string, overrideReason: string, accountCode = '') {
     allow(actor, 'tenant.approve');
     const row = await this.mustRequest(id);
     if (row.status !== 'APPROVED') throw new DomainError('REQUEST_STEP', 409);
@@ -637,7 +793,7 @@ export class PlatformService {
     if (!plan) throw new DomainError('NOT_FOUND', 404);
     const password = randomBytes(12).toString('base64url');
     const passwordHash = await this.passwords.hash(password);
-    let created: { tenantId: string };
+    let created: { tenantId: string; accountCode: string };
     try {
       created = await this.prisma.client.$transaction(async (tx) => {
       try {
@@ -652,17 +808,33 @@ export class PlatformService {
           management: row.branchCount > 1 ? 'SHARED' : 'INDEPENDENT',
           branchNameAr: 'الفرع الرئيسي',
           branchNameEn: 'Main branch',
+          accountCode,
         });
+        const docs = await tx.verificationDocument.findMany({ where: { requestId: id } });
+        const pharmacyDoc = docs.find((doc) => doc.kind === 'PHARMACY_LICENSE');
+        const pharmacistDoc = docs.find((doc) => doc.kind === 'PHARMACIST_LICENSE');
         await tx.tenant.update({
           where: { id: result.tenantId },
           data: {
             ownerName: row.ownerName,
             addressLine: `${row.stateName} - ${row.city} - ${row.addressLine}`,
+            latitude: row.latitude,
+            longitude: row.longitude,
             pharmacistName: row.pharmacistName,
-            pharmacistLicense: row.pharmacistLicense,
-            licenseNumber: row.pharmacyLicense,
+            pharmacistLicense: pharmacistDoc?.licenseNumber || row.pharmacistLicense,
+            licenseNumber: pharmacyDoc?.licenseNumber || row.pharmacyLicense,
             verificationStatus: docsOk ? 'VALID' : 'PENDING',
             featureFlags: plan.features,
+          },
+        });
+        await tx.branch.update({
+          where: { id: result.branchId },
+          data: {
+            state: row.stateName,
+            city: row.city,
+            addressLine: row.addressLine,
+            latitude: row.latitude,
+            longitude: row.longitude,
           },
         });
         const quote = await this.submittedQuote(id);
@@ -700,13 +872,37 @@ export class PlatformService {
       }
     }, { maxWait: 20_000, timeout: 60_000 });
     } catch (error) {
+      if (error instanceof Error && error.message === 'ACCOUNT_CODE') {
+        throw new DomainError('VALIDATION_ERROR', 400, { fields: { accountCode: 'invalid' } });
+      }
+      if (error instanceof Error && error.message === 'ACCOUNT_CODE_TAKEN') {
+        throw new DomainError('VALIDATION_ERROR', 409, { fields: { accountCode: 'taken' } });
+      }
       const field = takenField(error);
       if (field) throw new DomainError('VALIDATION_ERROR', 409, { fields: { [field]: 'taken' } });
       logger.error({ err: error }, 'create tenant failed');
       throw error;
     }
     await this.audit(actor.id, 'request.create_tenant', 'Tenant', created.tenantId, overrideReason, { requestId: id });
-    return { tenantId: created.tenantId, email: row.ownerEmail, password };
+    return { tenantId: created.tenantId, accountCode: created.accountCode, phone: row.ownerPhone, email: row.ownerEmail, password };
+  }
+
+  async updateRequestContact(actor: PlatformActor, id: string, ownerPhone: string, ownerEmail: string) {
+    allow(actor, 'tenant.approve');
+    const row = await this.mustRequest(id);
+    if (row.status !== 'APPROVED') throw new DomainError('REQUEST_STEP', 409);
+    const phone = ownerPhone.trim();
+    const email = ownerEmail.trim();
+    if (phone.length < 6 || phone.length > 20) throw new DomainError('VALIDATION_ERROR', 400, { fields: { ownerPhone: 'short' } });
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 320) {
+      throw new DomainError('VALIDATION_ERROR', 400, { fields: { ownerEmail: 'email' } });
+    }
+    await this.prisma.client.subscriptionRequest.update({
+      where: { id },
+      data: { ownerPhone: phone, ownerEmail: email, updatedAt: new Date() },
+    });
+    await this.audit(actor.id, 'request.contact', 'SubscriptionRequest', id, '', { ownerPhone: phone, ownerEmail: email });
+    return { ownerPhone: phone, ownerEmail: email };
   }
 
   async listMedicines(actor: PlatformActor, query: { q: string; form: string; category: string }) {
@@ -860,6 +1056,7 @@ export class PlatformService {
       });
       enriched += 1;
     }
+    await reindexMissing(this.prisma.client, 40);
     await this.audit(actor.id, 'catalog.library', 'StandardMedicine', 'library', '', { created, updated, enriched });
     return {
       created,
@@ -882,7 +1079,10 @@ export class PlatformService {
             { nameAr: { contains: needle } },
             { nameEn: { contains: needle } },
             { genericName: { contains: needle } },
+            { brandNameEn: { contains: needle } },
+            { brandNameAr: { contains: needle } },
             { manufacturer: { contains: needle } },
+            { modelNumber: { contains: needle } },
           ],
         }
       : {};
@@ -920,9 +1120,30 @@ export class PlatformService {
       requiresPrescription: boolean;
       storageCondition: string;
       status: string;
+      descriptionEn?: string;
+      descriptionAr?: string;
+      brandNameEn?: string;
+      brandNameAr?: string;
+      packSize?: string;
+      packUnit?: string;
+      registrationNumber?: string;
+      modelNumber?: string;
+      regulatoryReference?: string;
     },
   ) {
     allow(actor, 'catalog.write');
+    assertUniqueProduct(await findCommercialDuplicate(this.prisma.client, {
+      code: input.code,
+      nameEn: input.brandNameEn || input.nameEn,
+      genericName: input.genericName,
+      strength: input.strength,
+      dosageForm: input.dosageForm,
+      manufacturer: input.manufacturer,
+      brandNameEn: input.brandNameEn || input.nameEn,
+      barcode: input.barcode,
+    }, input.id));
+    const previous = input.id ? await this.prisma.client.globalCatalogItem.findUnique({ where: { id: input.id } }) : null;
+    if (input.id && !previous) throw new DomainError('NOT_FOUND', 404);
     const data = {
       code: input.code,
       itemType: input.itemType,
@@ -938,10 +1159,22 @@ export class PlatformService {
       isControlled: input.isControlled,
       requiresPrescription: input.requiresPrescription,
       storageCondition: input.storageCondition,
+      descriptionEn: input.descriptionEn ?? '',
+      descriptionAr: input.descriptionAr ?? '',
+      brandNameEn: input.brandNameEn ?? '',
+      brandNameAr: input.brandNameAr ?? '',
+      packSize: input.packSize ?? '',
+      packUnit: input.packUnit ?? '',
+      registrationNumber: input.registrationNumber ?? '',
+      modelNumber: input.modelNumber ?? '',
+      regulatoryReference: input.regulatoryReference ?? '',
       status: input.status,
+      versionNo: previous ? previous.versionNo + 1 : 1,
+      publishedAt: input.status === 'active' ? previous?.publishedAt ?? new Date() : previous?.publishedAt ?? null,
     };
-    const item = input.id
-      ? await this.prisma.client.globalCatalogItem.update({ where: { id: input.id }, data })
+    if (previous) await writeCatalogRevision(this.prisma.client, previous.id, previous.versionNo, previous, actor.id);
+    const item = previous
+      ? await this.prisma.client.globalCatalogItem.update({ where: { id: previous.id }, data })
       : await this.prisma.client.globalCatalogItem.create({ data });
     if (input.barcode) {
       await this.prisma.client.globalCatalogBarcode.deleteMany({ where: { itemId: item.id } });
@@ -953,16 +1186,108 @@ export class PlatformService {
         data: { itemId: item.id, unitName: input.unitName, factorToBase: input.factorToBase },
       });
     }
+    await indexCatalogItem(this.prisma.client, item.id);
     if (input.status === 'active') await this.publishStandard(item.id);
-    await this.audit(actor.id, input.id ? 'catalog.update' : 'catalog.create', 'GlobalCatalogItem', item.id);
+    else await this.prisma.client.standardMedicine.updateMany({ where: { code: item.code }, data: { status: 'UNPUBLISHED' } });
+    await this.audit(actor.id, input.id ? 'catalog.update' : 'catalog.create', 'GlobalCatalogItem', item.id, '', { status: input.status, versionNo: data.versionNo });
     return { id: item.id };
   }
 
   async pushCatalog(actor: PlatformActor, id: string) {
     allow(actor, 'catalog.write');
+    await this.prisma.client.globalCatalogItem.update({
+      where: { id },
+      data: { status: 'active', publishedAt: new Date() },
+    });
     await this.publishStandard(id);
-    await this.audit(actor.id, 'catalog.push', 'GlobalCatalogItem', id);
+    await indexCatalogItem(this.prisma.client, id);
+    await this.audit(actor.id, 'catalog.publish', 'GlobalCatalogItem', id);
     return { ok: true };
+  }
+
+  async catalogHistory(actor: PlatformActor, id: string) {
+    allow(actor, 'catalog.write');
+    const rows = await this.prisma.client.globalCatalogRevision.findMany({
+      where: { itemId: id },
+      orderBy: { versionNo: 'desc' },
+      take: 30,
+    });
+    return rows.map((row) => ({ id: row.id, versionNo: row.versionNo, createdAt: row.createdAt.toISOString(), actorId: row.actorId }));
+  }
+
+  async catalogSheet(actor: PlatformActor) {
+    allow(actor, 'catalog.write');
+    return this.prisma.client.globalCatalogItem.findMany({
+      where: { status: { in: ['active', 'PUBLISHED', 'draft'] } },
+      orderBy: { nameEn: 'asc' },
+      take: 2000,
+      select: { code: true, nameAr: true, nameEn: true, genericName: true, dosageForm: true, strength: true, manufacturer: true, status: true },
+    });
+  }
+
+  async catalogDuplicates(actor: PlatformActor) {
+    allow(actor, 'catalog.write');
+    const groups = await globalDuplicateReport(this.prisma.client);
+    return { groups: groups.slice(0, 40) };
+  }
+
+  async importCatalogCsv(actor: PlatformActor, csv: string, publish: boolean) {
+    allow(actor, 'catalog.write');
+    const table = parseCsv(csv);
+    const header = table[0]?.map((cell) => cell.trim()) ?? [];
+    const index = new Map(header.map((name, position) => [name, position]));
+    const cell = (row: string[], name: string) => row[index.get(name) ?? -1]?.trim() ?? '';
+    let created = 0;
+    let skipped = 0;
+    const errors: string[] = [];
+    for (const row of table.slice(1)) {
+      const code = cell(row, 'code');
+      const nameEn = cell(row, 'nameEn');
+      const nameAr = cell(row, 'nameAr') || nameEn;
+      const genericName = cell(row, 'genericName') || nameEn;
+      if (!code || !nameEn) {
+        errors.push(code || '?');
+        continue;
+      }
+      try {
+        await this.saveCatalog(actor, {
+          code,
+          itemType: cell(row, 'itemType') || 'Medicine',
+          nameAr,
+          nameEn,
+          genericName,
+          strength: cell(row, 'strength'),
+          dosageForm: cell(row, 'dosageForm') || cell(row, 'form') || 'TABLET',
+          manufacturer: cell(row, 'manufacturer'),
+          country: cell(row, 'country'),
+          categoryName: cell(row, 'categoryName') || cell(row, 'categoryEn') || 'General',
+          atcCode: cell(row, 'atcCode'),
+          barcode: cell(row, 'barcode') || cell(row, 'gtin'),
+          unitName: cell(row, 'packUnit') || 'علبة',
+          factorToBase: 1,
+          isControlled: false,
+          requiresPrescription: false,
+          storageCondition: '',
+          status: publish ? 'active' : 'draft',
+          brandNameEn: cell(row, 'brandNameEn'),
+          brandNameAr: cell(row, 'brandNameAr'),
+          packSize: cell(row, 'packSize'),
+          descriptionEn: cell(row, 'descriptionEn'),
+          descriptionAr: cell(row, 'descriptionAr'),
+          modelNumber: cell(row, 'modelNumber'),
+          registrationNumber: cell(row, 'registrationNumber'),
+        });
+        created += 1;
+      } catch (error) {
+        if (error instanceof DomainError && error.code === 'DUPLICATE_PRODUCT') {
+          skipped += 1;
+          continue;
+        }
+        errors.push(code);
+      }
+    }
+    await this.audit(actor.id, 'catalog.import', 'GlobalCatalogItem', 'csv', '', { created, skipped });
+    return { created, skipped, errors };
   }
 
   async listItemRequests(actor: PlatformActor) {
@@ -998,13 +1323,13 @@ export class PlatformService {
         try {
           const saved = await this.saveCatalog(actor, {
             code,
-            itemType: 'Medicine',
+            itemType: row.itemType || 'Medicine',
             nameAr: row.nameAr,
             nameEn: row.nameEn,
             genericName: row.genericName,
-            strength: '',
-            dosageForm: 'TABLET',
-            manufacturer: '',
+            strength: row.strength,
+            dosageForm: row.packaging || 'TABLET',
+            manufacturer: row.manufacturer,
             country: '',
             categoryName: 'عام',
             atcCode: '',
@@ -1015,9 +1340,17 @@ export class PlatformService {
             requiresPrescription: false,
             storageCondition: '',
             status: 'active',
+            brandNameEn: row.itemKind === 'BRAND' ? row.nameEn : '',
+            brandNameAr: row.itemKind === 'BRAND' ? row.nameAr : '',
+            packSize: row.packaging,
           });
           createdId = saved.id;
         } catch (error) {
+          if (error instanceof DomainError && error.code === 'DUPLICATE_PRODUCT') {
+            const fields = (error.details as { fields?: { matchId?: string } } | null)?.fields;
+            nextStatus = 'DUPLICATE_SUSPECTED';
+            createdId = fields?.matchId ?? createdId;
+          } else {
           const message = error instanceof Error ? error.message : '';
           if (!message.includes('Unique constraint')) throw error;
           const match = await this.prisma.client.globalCatalogItem.findFirst({
@@ -1025,6 +1358,7 @@ export class PlatformService {
           });
           nextStatus = 'DUPLICATE_SUSPECTED';
           createdId = match?.id ?? createdId;
+          }
         }
       }
     }
@@ -1244,6 +1578,7 @@ export class PlatformService {
     return rows.map((row) => ({
       id: row.id,
       email: row.email,
+      phone: row.phone,
       displayName: row.displayName,
       roleCode: row.role.code,
       isActive: row.isActive,
@@ -1251,13 +1586,17 @@ export class PlatformService {
     }));
   }
 
-  async saveUser(actor: PlatformActor, input: { email: string; displayName: string; password: string; roleCode: string }) {
+  async saveUser(actor: PlatformActor, input: { email: string; phone: string; displayName: string; password: string; roleCode: string }) {
     allow(actor, 'user.manage');
     const role = await this.prisma.client.platformRole.findUnique({ where: { code: input.roleCode } });
     if (!role) throw new DomainError('NOT_FOUND', 404);
+    const taken = await this.prisma.client.platformUser.findFirst({ where: { OR: [{ email: input.email }, { phone: input.phone }] } });
+    if (taken?.phone === input.phone) throw new DomainError('VALIDATION_ERROR', 409, { fields: { phone: 'taken' } });
+    if (taken) throw new DomainError('VALIDATION_ERROR', 409, { fields: { email: 'taken' } });
     const row = await this.prisma.client.platformUser.create({
       data: {
         email: input.email,
+        phone: input.phone,
         displayName: input.displayName,
         passwordHash: await this.passwords.hash(input.password),
         roleId: role.id,
@@ -1355,7 +1694,8 @@ export class PlatformService {
     const docs = await this.prisma.client.verificationDocument.findMany({ where: { requestId } });
     const pharmacy = docs.find((row) => row.kind === 'PHARMACY_LICENSE');
     const pharmacist = docs.find((row) => row.kind === 'PHARMACIST_LICENSE');
-    return pharmacy?.status === 'VALID' && pharmacist?.status === 'VALID';
+    if (pharmacy?.status !== 'VALID') return false;
+    return !pharmacist || pharmacist.status === 'VALID';
   }
 
   private async requireValidDocs(requestId: string): Promise<void> {
@@ -1497,6 +1837,13 @@ export class PlatformService {
       create: { code: item.code, ...data },
       update: data,
     });
+    if (item.status !== 'active' || !item.publishedAt) {
+      await this.prisma.client.globalCatalogItem.update({
+        where: { id },
+        data: { status: 'active', publishedAt: item.publishedAt ?? new Date() },
+      });
+    }
+    await indexCatalogItem(this.prisma.client, id);
   }
 
   private async planOffers(activeOnly: boolean) {
@@ -1583,6 +1930,9 @@ export type RequestInput = {
   stateName: string;
   city: string;
   addressLine: string;
+  latitude: number | null;
+  longitude: number | null;
+  openTrial: boolean;
   planCode: string;
   branchCount: number;
   userCount: number;

@@ -90,6 +90,21 @@ export class AuthController {
     return { ok: true };
   }
 
+  @Post('password')
+  @UseGuards(AuthGuard)
+  changePassword(
+    @Req() request: AuthenticatedRequest,
+    @Body(new ZodValidationPipe(z.object({
+      currentPassword: z.string().min(10).max(200),
+      nextPassword: z.string().min(10).max(200),
+    })))
+    body: { currentPassword: string; nextPassword: string },
+  ) {
+    const auth = request.auth;
+    if (!auth) throw new Error('missing auth');
+    return this.auth.changePassword(auth.userId, auth.tenantId, body.currentPassword, body.nextPassword);
+  }
+
   @Get('me')
   @UseGuards(AuthGuard)
   me(@Req() request: AuthenticatedRequest) {

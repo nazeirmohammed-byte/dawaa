@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { PrismaClient } from '@dawaa/db';
-import { PERMISSIONS, ROLE_CODES, ROLE_PERMISSIONS, type PermissionCode, type RoleCode } from '@dawaa/shared';
+import { SUDAN_SUPPLIERS, PERMISSIONS, ROLE_CODES, ROLE_PERMISSIONS, type PermissionCode, type RoleCode } from '@dawaa/shared';
+import { defaultAlertSettings } from '../board/alerts.logic';
+import { accountCodeShape, cleanAccountCode, nextTenantAccountCode } from './account-code';
 
 type Tx = Parameters<Parameters<PrismaClient['$transaction']>[0]>[0];
 
@@ -36,16 +38,28 @@ export type PharmacySignup = {
   branchNameAr: string;
   branchNameEn: string;
   verificationStatus?: 'PENDING' | 'VALID';
+  accountCode?: string;
 };
 
-export async function provisionPharmacy(tx: Tx, input: PharmacySignup): Promise<{ tenantId: string; userId: string; branchId: string }> {
+export async function provisionPharmacy(
+  tx: Tx,
+  input: PharmacySignup,
+): Promise<{ tenantId: string; userId: string; branchId: string; accountCode: string }> {
   const tenantId = randomUUID();
   const branchId = randomUUID();
   const userId = randomUUID();
+  const requested = input.accountCode ? cleanAccountCode(input.accountCode) : '';
+  if (input.accountCode?.trim() && !accountCodeShape(requested)) throw new Error('ACCOUNT_CODE');
+  if (requested) {
+    const existing = await tx.tenant.findUnique({ where: { accountCode: requested }, select: { id: true } });
+    if (existing) throw new Error('ACCOUNT_CODE_TAKEN');
+  }
+  const accountCode = requested || (await nextTenantAccountCode(tx));
   const trialEndsAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
   await tx.tenant.create({
     data: {
       id: tenantId,
+      accountCode,
       type: input.branchCount > 1 ? 'GROUP' : 'INDIVIDUAL',
       dbMode: 'SHARED',
       status: 'TRIAL',
@@ -115,12 +129,24 @@ export async function provisionPharmacy(tx: Tx, input: PharmacySignup): Promise<
   await tx.customer.create({
     data: { tenantId, nameAr: 'عميل نقدي', nameEn: 'Cash customer', balance: '0.00' },
   });
+  await tx.supplier.createMany({
+    data: SUDAN_SUPPLIERS.map((supplier) => ({
+      id: randomUUID(),
+      tenantId,
+      nameAr: supplier.nameAr,
+      nameEn: supplier.nameEn,
+      phone: supplier.phone,
+      city: supplier.city,
+      balance: '0.00',
+    })),
+  });
   const settings = [
     { key: 'currency', valueAr: 'ج.س', valueEn: 'SDG' },
     { key: 'receipt_footer', valueAr: 'شكراً لزيارتكم', valueEn: 'Thank you' },
     { key: 'shelf_months', valueAr: '6', valueEn: '6' },
     { key: 'round_increment', valueAr: '50', valueEn: '50' },
     { key: 'management', valueAr: input.management === 'INDEPENDENT' ? 'مستقل' : 'مشترك', valueEn: input.management },
+    ...defaultAlertSettings().map((item) => ({ key: item.key, valueAr: item.value, valueEn: item.value })),
   ];
   for (const setting of settings) {
     await tx.pharmacySetting.create({ data: { tenantId, ...setting } });
@@ -135,5 +161,5 @@ export async function provisionPharmacy(tx: Tx, input: PharmacySignup): Promise<
       details: JSON.stringify({ branchLimit: input.branchCount, management: input.management }),
     },
   });
-  return { tenantId, userId, branchId };
+  return { tenantId, userId, branchId, accountCode };
 }

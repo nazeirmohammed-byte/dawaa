@@ -43,13 +43,15 @@ export function ReceiptSlip({ receipt }: { receipt: ReceiptPreview }) {
   const ui = useUi();
   const arabic = ui.language.startsWith('ar');
   return (
-    <article className="receipt" style={{ width: `${THERMAL_WIDTH_MM}mm` }}>
+    <article className="receipt" style={{ width: `${receipt.widthMm || THERMAL_WIDTH_MM}mm` }}>
       <h2>{arabic ? receipt.pharmacyAr : receipt.pharmacyEn || receipt.pharmacyAr}</h2>
       <p className="en">{arabic ? receipt.pharmacyEn : receipt.pharmacyAr}</p>
       <p>{arabic ? receipt.branchAr : receipt.branchEn || receipt.branchAr}</p>
-      <p>
-        {t('phone')}: {receipt.phone}
-      </p>
+      {receipt.showPhone === false || !receipt.phone ? null : (
+        <p>
+          {t('phone')}: {receipt.phone}
+        </p>
+      )}
       <hr />
       <p>
         {t('invoice')} {receipt.receiptNo}
@@ -60,14 +62,22 @@ export function ReceiptSlip({ receipt }: { receipt: ReceiptPreview }) {
       </p>
       <hr />
       <table>
+        <thead>
+          <tr>
+            <th>{t('drug')}</th>
+            <th className="num">{t('qty')}</th>
+            <th className="num">{t('lineTotal')}</th>
+          </tr>
+        </thead>
         <tbody>
           {receipt.lines.map((line) => (
-            <tr key={`${line.nameAr}-${line.qty}`}>
+            <tr key={`${line.nameAr}-${line.qty}-${line.total}`}>
               <td>
                 {arabic ? line.nameAr : line.nameEn}
                 <br />
-                {line.qty} {arabic ? line.unitAr : line.unitEn} × {line.price}
+                {arabic ? line.unitAr : line.unitEn} × {line.price}
               </td>
+              <td className="num">{line.qty}</td>
               <td className="num">{line.total}</td>
             </tr>
           ))}
@@ -97,7 +107,7 @@ export function ReceiptSlip({ receipt }: { receipt: ReceiptPreview }) {
         </div>
       </div>
       <hr />
-      <p>{t('thanks')}</p>
+      <p>{arabic ? receipt.footerAr || t('thanks') : receipt.footerEn || t('thanks')}</p>
     </article>
   );
 }

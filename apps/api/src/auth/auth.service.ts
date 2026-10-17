@@ -29,10 +29,8 @@ export class AuthService {
   ) {}
 
   async register(input: PharmacySignup): Promise<{ pending: true; email: string }> {
-    const existing = await this.users.findByIdentifier(input.email);
-    if (existing) throw new DomainError('VALIDATION_ERROR', 409, { fields: { email: 'taken' } });
-    if (input.phone && (await this.users.findByIdentifier(input.phone))) {
-      throw new DomainError('VALIDATION_ERROR', 409, { fields: { phone: 'taken' } });
+    if (await this.users.emailTaken(input.email)) {
+      throw new DomainError('VALIDATION_ERROR', 409, { fields: { email: 'taken' } });
     }
     await this.prisma.client.$transaction(async (tx) => {
       try {
@@ -53,10 +51,10 @@ export class AuthService {
   }
 
   async login(
-    input: { identifier: string; password: string; otp?: string },
+    input: { tenantCode: string; phone: string; password: string; otp?: string },
     meta: { userAgent: string | null; ipAddress: string | null },
   ): Promise<{ profile: AuthProfile; tokens: AuthTokens }> {
-    const user = await this.users.findByIdentifier(input.identifier.trim());
+    const user = await this.users.findByTenantAndPhone(input.tenantCode.trim(), input.phone.trim());
     const passwordOk = await this.passwords.verify(user?.passwordHash ?? this.passwords.dummyHash, input.password);
     if (user && !passwordOk) {
       await this.prisma.withTenant(user.tenantId, (tx) =>
@@ -148,6 +146,21 @@ export class AuthService {
     if (!profile) throw new DomainError('UNAUTHORIZED', 401);
     await this.audit.write({ tenantId: grant.tenantId, actorId: grant.userId, action: 'auth.impersonate' });
     return { profile, tokens };
+  }
+
+  async changePassword(userId: string, tenantId: string, currentPassword: string, nextPassword: string): Promise<{ ok: true }> {
+    const user = await this.prisma.withTenant(tenantId, (tx) =>
+      tx.user.findFirst({ where: { id: userId, tenantId, isDeleted: false } }),
+    );
+    if (!user) throw new DomainError('UNAUTHORIZED', 401);
+    const ok = await this.passwords.verify(user.passwordHash, currentPassword);
+    if (!ok) throw new DomainError('AUTH_INVALID_CREDENTIALS', 401);
+    const passwordHash = await this.passwords.hash(nextPassword);
+    await this.prisma.withTenant(tenantId, (tx) =>
+      tx.user.update({ where: { id: userId }, data: { passwordHash } }),
+    );
+    await this.audit.write({ tenantId, actorId: userId, action: 'auth.password_change' });
+    return { ok: true };
   }
 
   async me(userId: string, tenantId: string, branchId: string | null): Promise<AuthProfile> {

@@ -23,9 +23,9 @@ type LoginRow = {
 export class LoginLookup {
   constructor(private readonly prisma: PrismaService) {}
 
-  async findByIdentifier(identifier: string): Promise<LoginRecord | null> {
+  async findByTenantAndPhone(tenantCode: string, phone: string): Promise<LoginRecord | null> {
     const rows = await this.prisma.client.$queryRaw<LoginRow[]>(
-      Prisma.sql`EXEC dbo.usp_FindUserForLogin @Identifier = ${identifier}`,
+      Prisma.sql`EXEC dbo.usp_FindUserForLogin @TenantCode = ${tenantCode}, @Phone = ${phone}`,
     );
     if (rows.length > 1) return null;
     const row = rows[0];
@@ -45,5 +45,12 @@ export class LoginLookup {
       tenantType: row.tenantType,
       featureFlags: row.featureFlags,
     };
+  }
+
+  async emailTaken(email: string): Promise<boolean> {
+    const rows = await this.prisma.client.$queryRaw<{ id: string }[]>(
+      Prisma.sql`EXEC dbo.usp_FindUserEmail @Email = ${email}`,
+    );
+    return rows.length > 0;
   }
 }

@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { PrismaClient } from '@dawaa/db';
 import { cmpMoney } from '@dawaa/shared';
 import { DomainError } from '../http/domain-error';
 import { OpsService } from '../ops/ops.service';
@@ -43,7 +44,10 @@ export type ReceiptPreview = {
   paid: string;
   changeDue: string;
   paymentMethod: string;
-  widthMm: 58;
+  widthMm: number;
+  footerAr: string;
+  footerEn: string;
+  showPhone: boolean;
 };
 
 @Injectable()
@@ -84,6 +88,7 @@ export class BoardService {
 
   async receipt(tenantId: string): Promise<ReceiptPreview> {
     return this.prisma.withTenant(tenantId, async (tx) => {
+      const options = await receiptOptions(tx, tenantId);
       const sale = await tx.sale.findFirst({
         where: { tenantId, status: 'POSTED' },
         orderBy: { soldAt: 'desc' },
@@ -121,7 +126,7 @@ export class BoardService {
           paid: sale.paid.toFixed(2),
           changeDue: sale.changeDue.toFixed(2),
           paymentMethod: sale.paymentMethod,
-          widthMm: 58,
+          ...options,
         };
       }
       const draft = await tx.receiptDraft.findFirst({
@@ -148,10 +153,33 @@ export class BoardService {
         paid: draft.paid.toFixed(2),
         changeDue: draft.changeDue.toFixed(2),
         paymentMethod: draft.paymentMethod,
-        widthMm: 58,
+        ...options,
       };
     });
   }
+}
+
+type TenantTx = Parameters<Parameters<PrismaClient['$transaction']>[0]>[0];
+
+async function receiptOptions(tx: TenantTx, tenantId: string) {
+  const defaults = [
+    { key: 'receiptWidth', valueAr: '58', valueEn: '58' },
+    { key: 'receiptFooter', valueAr: 'شكراً لزيارتكم', valueEn: 'Thank you' },
+    { key: 'receiptShowPhone', valueAr: '1', valueEn: '1' },
+  ];
+  const found = await tx.pharmacySetting.findMany({ where: { tenantId, key: { in: defaults.map((item) => item.key) } } });
+  for (const item of defaults) {
+    if (!found.some((row) => row.key === item.key)) await tx.pharmacySetting.create({ data: { tenantId, ...item } });
+  }
+  const rows = found.length === defaults.length ? found : await tx.pharmacySetting.findMany({ where: { tenantId, key: { in: defaults.map((item) => item.key) } } });
+  const value = (key: string) => rows.find((row) => row.key === key) ?? defaults.find((row) => row.key === key)!;
+  const width = value('receiptWidth').valueEn === '80' ? 80 : 58;
+  return {
+    widthMm: width,
+    footerAr: value('receiptFooter').valueAr,
+    footerEn: value('receiptFooter').valueEn,
+    showPhone: value('receiptShowPhone').valueAr !== '0',
+  };
 }
 
 type Report = Awaited<ReturnType<OpsService['reports']>>;
@@ -252,6 +280,20 @@ function liveBoard(report: Report): {
       ...figure(report.stockValue),
     },
   ];
+  if (report.stocking) {
+    inventory.unshift({
+      id: 'ready-stock',
+      lane: 'INVENTORY',
+      severity: report.stocking.awaitingPosting > 0 ? 'watch' : 'info',
+      code: 'ready-stock',
+      titleAr: 'أدوية جاهزة للتخزين',
+      titleEn: 'Medicines ready for stocking',
+      detailAr: `كمية بانتظار الإدخال ${report.stocking.pendingQty}`,
+      detailEn: `${report.stocking.pendingQty} units still waiting to be posted`,
+      figureAr: `${report.stocking.awaitingPosting}`,
+      figureEn: `${report.stocking.awaitingPosting}`,
+    });
+  }
   const procurement: BoardCard[] = [
     ...report.suppliers
       .filter((supplier) => cmpMoney(supplier.balance, '0.00') > 0)
@@ -278,6 +320,34 @@ function liveBoard(report: Report): {
       ...figure(order.total),
     })),
   ];
+  if (report.stocking) {
+    procurement.unshift(
+      {
+        id: 'pending-receipts',
+        lane: 'PROCUREMENT',
+        severity: report.stocking.pendingReceipts > 0 ? 'watch' : 'info',
+        code: 'pending-receipts',
+        titleAr: 'بانتظار الاستلام',
+        titleEn: 'Pending receipts',
+        detailAr: 'أوامر معتمدة لم تُستلم بالكامل',
+        detailEn: 'Approved orders that are not fully received',
+        figureAr: `${report.stocking.pendingReceipts}`,
+        figureEn: `${report.stocking.pendingReceipts}`,
+      },
+      {
+        id: 'awaiting-post',
+        lane: 'PROCUREMENT',
+        severity: report.stocking.awaitingPosting > 0 ? 'watch' : 'info',
+        code: 'awaiting-post',
+        titleAr: 'بانتظار إدخال المخزون',
+        titleEn: 'Awaiting inventory posting',
+        detailAr: `${report.stocking.fullyStocked} دواء دخل المخزون بالكامل`,
+        detailEn: `${report.stocking.fullyStocked} medicines are fully stocked`,
+        figureAr: `${report.stocking.awaitingPosting}`,
+        figureEn: `${report.stocking.awaitingPosting}`,
+      },
+    );
+  }
   const marketing: BoardCard[] = report.top.map((item, index) => ({
     id: `top-${index}`,
     lane: 'MARKETING',

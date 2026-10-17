@@ -21,7 +21,7 @@ export function takenField(error: unknown): 'email' | 'phone' | null {
     parts.push(JSON.stringify((error as { meta?: unknown }).meta ?? ''));
   }
   const text = parts.join(' ');
-  if (text.includes('UX_Users_phone')) return 'phone';
+  if (text.includes('UX_Users_phone') || text.includes('UX_Users_tenant_phone')) return 'phone';
   if (text.includes('UX_Users_email')) return 'email';
   return null;
 }

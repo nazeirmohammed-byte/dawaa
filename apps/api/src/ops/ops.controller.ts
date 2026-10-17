@@ -1,4 +1,6 @@
-import { Body, Controller, Get, Param, Post, Put, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Header, Param, Post, Put, Query, Req, Res, UseGuards } from '@nestjs/common';
+import type { Response } from 'express';
+import ExcelJS from 'exceljs';
 import { ApiTags } from '@nestjs/swagger';
 import { z } from 'zod';
 import { AuthGuard, type AuthenticatedRequest } from '../auth/auth.guard';
@@ -7,6 +9,18 @@ import { ZodValidationPipe } from '../http/zod.pipe';
 import { OpsService } from './ops.service';
 
 const moneyText = z.string().trim().regex(/^\d+(\.\d{1,2})?$/);
+const optionalBatch = z
+  .string()
+  .trim()
+  .max(64)
+  .optional()
+  .default('')
+  .transform((value) => {
+    const text = value.trim();
+    if (!text || text.toUpperCase() === 'OPEN') return 'N/A';
+    return text;
+  });
+const optionalMoney = z.union([moneyText, z.literal('')]).optional().default('');
 const uuid = z.string().uuid();
 
 const productSchema = z.object({
@@ -19,7 +33,7 @@ const productSchema = z.object({
   reorderLevel: z.number().int().nonnegative(),
   sellPrice: moneyText,
   costPrice: moneyText,
-  batchNo: z.string().trim().min(1).max(64),
+  batchNo: optionalBatch,
   expiry: z.string().min(8),
   qtyBase: z.number().int().positive(),
   location: z.string().trim().min(1).max(100),
@@ -34,35 +48,84 @@ const adjustSchema = z.object({
   note: z.string().trim().min(1).max(300),
 });
 
+const itemPackSchema = z.object({
+  outer: z.enum(['BOX', 'STRIP', 'BOTTLE', 'PIECE']),
+  inner: z.enum(['STRIP', 'BOTTLE', 'PIECE']),
+  perBox: z.number().int().min(1).max(10_000),
+  perInner: z.number().int().min(1).max(10_000),
+});
+
 const saleSchema = z.object({
   customerName: z.string().trim().min(1).max(200),
   discount: moneyText,
   paid: moneyText,
   paymentMethod: z.enum(['CASH', 'BANKAK', 'FAWRY', 'TRANSFER']),
-  lines: z.array(z.object({ productId: uuid, qty: z.number().int().positive() })).min(1).max(40),
+  lines: z
+    .array(
+      z.object({
+        productId: uuid,
+        qty: z.number().int().positive(),
+        unit: z.enum(['BOX', 'STRIP', 'BOTTLE', 'PIECE']).optional(),
+      }),
+    )
+    .min(1)
+    .max(40),
 });
 
 const stockLine = {
   qty: z.number().int().positive().max(1_000_000),
   unitCost: moneyText,
-  batchNo: z.string().trim().min(1).max(64),
+  batchNo: optionalBatch,
   expiry: z.string().min(8),
   location: z.string().trim().min(1).max(100),
   manufacturedAt: z.string().optional().default(''),
   serialNo: z.string().trim().max(64).optional().default(''),
   bonusQty: z.number().int().nonnegative().optional().default(0),
+  rejectedQty: z.number().int().nonnegative().optional().default(0),
   unitCode: z.string().trim().max(32).optional().default('BASE'),
+  pack: itemPackSchema.optional(),
 };
 
 const purchaseSchema = z.object({
   supplierId: uuid,
+  priority: z.enum(['LOW', 'NORMAL', 'HIGH']).optional().default('NORMAL'),
+  notes: z.string().trim().max(400).optional().default(''),
   lines: z
     .array(
       z
         .object({
           productId: uuid.optional(),
           code: z.string().trim().max(64).optional().default(''),
-          sellPrice: moneyText.optional().default(''),
+          qty: z.number().int().positive().max(1_000_000),
+          unitCost: optionalMoney,
+          sellPrice: optionalMoney,
+          pack: itemPackSchema.optional(),
+        })
+        .refine((line) => Boolean(line.productId) || line.code.length > 0),
+    )
+    .min(1)
+    .max(200),
+});
+
+const goodsReceiptSchema = z.object({
+  clientKey: uuid,
+  purchaseId: uuid.optional(),
+  opening: z.boolean().optional().default(false),
+  override: z.boolean().optional().default(false),
+  supplierInvoice: z.string().trim().max(64).optional().default(''),
+  currency: z.enum(['SDG', 'USD']).optional().default('SDG'),
+  discount: optionalMoney,
+  tax: optionalMoney,
+  charges: optionalMoney,
+  post: z.boolean(),
+  lines: z
+    .array(
+      z
+        .object({
+          productId: uuid.optional(),
+          code: z.string().trim().max(64).optional().default(''),
+          sellPrice: optionalMoney,
+          condition: z.enum(['AVAILABLE', 'REJECTED', 'QUARANTINE', 'DAMAGED']).optional().default('AVAILABLE'),
           ...stockLine,
         })
         .refine((line) => Boolean(line.productId) || line.code.length > 0),
@@ -71,6 +134,27 @@ const purchaseSchema = z.object({
     .max(200),
 });
 
+const inventoryEntrySchema = z
+  .object({
+    clientKey: uuid,
+    post: z.boolean(),
+    lines: z
+      .array(
+        z.object({
+          receiptLineId: uuid,
+          qty: z.number().int().positive().max(1_000_000),
+          location: z.string().trim().min(1).max(32),
+        }),
+      )
+      .max(200),
+  })
+  .superRefine((value, ctx) => {
+    if (value.post && value.lines.length < 1) ctx.addIssue({ code: 'custom', message: 'lines', path: ['lines'] });
+    if (new Set(value.lines.map((line) => line.receiptLineId)).size !== value.lines.length) {
+      ctx.addIssue({ code: 'custom', message: 'duplicate', path: ['lines'] });
+    }
+  });
+
 const receiveSchema = z.object({
   lines: z
     .array(
@@ -78,7 +162,7 @@ const receiveSchema = z.object({
         .object({
           productId: uuid.optional(),
           code: z.string().trim().max(64).optional().default(''),
-          sellPrice: moneyText.optional().default(''),
+          sellPrice: optionalMoney,
           ...stockLine,
         })
         .refine((line) => Boolean(line.productId) || line.code.length > 0),
@@ -93,11 +177,22 @@ const expenseSchema = z.object({
   amount: moneyText,
 });
 
+const supplierSchema = z.object({
+  nameAr: z.string().trim().min(2).max(200),
+  nameEn: z.string().trim().min(2).max(200),
+  phone: z.string().trim().max(20).default(''),
+  city: z.string().trim().max(100).default(''),
+  batchNotes: z.string().trim().max(400).optional().default(''),
+});
+
 const branchSchema = z.object({
   nameAr: z.string().trim().min(2).max(200),
   nameEn: z.string().trim().min(2).max(200),
-  city: z.string().trim().max(100).default(''),
+  city: z.string().trim().min(2).max(100),
+  addressLine: z.string().trim().min(2).max(300),
   phone: z.string().trim().max(20).default(''),
+  latitude: z.number().gte(8.4).lte(22.3),
+  longitude: z.number().gte(21.7).lte(38.7),
 });
 
 const managementSchema = z.object({
@@ -106,7 +201,8 @@ const managementSchema = z.object({
 
 const userSchema = z.object({
   displayName: z.string().trim().min(1).max(200),
-  email: z.string().trim().email().max(320),
+  email: z.union([z.string().trim().email().max(320), z.literal('')]).optional().default(''),
+  phone: z.string().trim().min(6).max(20),
   password: z.string().min(10).max(200),
   branchId: z.string().uuid().optional(),
   roleCode: z.enum([
@@ -251,12 +347,78 @@ export class OpsController {
     @Req() request: AuthenticatedRequest,
     @Body(new ZodValidationPipe(settingSchema)) body: z.infer<typeof settingSchema>,
   ) {
-    return this.ops.saveSetting(this.tenant(request), body);
+    return this.ops.saveSetting(this.tenant(request), this.actor(request), body);
   }
 
   @Get('reports')
   reports(@Req() request: AuthenticatedRequest) {
     return this.ops.reports(this.tenant(request), this.actor(request), this.branch(request), this.header(request));
+  }
+
+  @Get('reports/table')
+  reportTable(
+    @Req() request: AuthenticatedRequest,
+    @Query('kind') kind = 'sales',
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.ops.reportTable(
+      this.tenant(request),
+      this.actor(request),
+      this.branch(request),
+      this.header(request),
+      kind,
+      from ?? null,
+      to ?? null,
+    );
+  }
+
+  @Get('reports/export.xlsx')
+  @Header('content-type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  async reportXlsx(
+    @Req() request: AuthenticatedRequest,
+    @Res() response: Response,
+    @Query('kind') kind = 'sales',
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    const table = await this.ops.reportTable(
+      this.tenant(request),
+      this.actor(request),
+      this.branch(request),
+      this.header(request),
+      kind,
+      from ?? null,
+      to ?? null,
+    );
+    const book = new ExcelJS.Workbook();
+    const sheet = book.addWorksheet(kind.slice(0, 31));
+    sheet.addRow([table.titleAr, table.accountCode, `${table.from} → ${table.to}`]);
+    sheet.addRow(table.columns.map((column) => column.labelAr));
+    const header = sheet.getRow(2);
+    header.font = { bold: true };
+    header.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD7EDE4' } };
+    for (const row of table.rows) {
+      const values = table.columns.map((column) => {
+        const value = row[column.key];
+        if (column.kind === 'number') return Number(value);
+        if (column.kind === 'money') return Number(value);
+        return value;
+      });
+      sheet.addRow(values);
+    }
+    sheet.addRow(['', '', table.total]);
+    const arabic = (request.header('accept-language') ?? '').toLowerCase().includes('ar');
+    sheet.views = [{ state: 'frozen', ySplit: 2, rightToLeft: arabic }];
+    sheet.autoFilter = { from: { row: 2, column: 1 }, to: { row: 2, column: table.columns.length } };
+    table.columns.forEach((column, index) => {
+      const cell = sheet.getColumn(index + 1);
+      cell.width = Math.max(14, column.labelAr.length + 4);
+      if (column.kind === 'money') cell.numFmt = '#,##0.00';
+    });
+    response.setHeader('content-disposition', `attachment; filename="dawaa-${kind}.xlsx"`);
+    await book.xlsx.write(response);
+    response.end();
   }
 
   @Get('catalog')
@@ -313,6 +475,36 @@ export class OpsController {
     return this.ops.publishCatalog(this.tenant(request), this.actor(request), body.rows);
   }
 
+  @Post('receipts')
+  saveReceipt(
+    @Req() request: AuthenticatedRequest,
+    @Body(new ZodValidationPipe(goodsReceiptSchema)) body: z.infer<typeof goodsReceiptSchema>,
+  ) {
+    return this.ops.saveGoodsReceipt(this.tenant(request), this.branch(request), this.actor(request), this.header(request), body);
+  }
+
+  @Get('stock/pending')
+  pendingStock(@Req() request: AuthenticatedRequest, @Query('clientKey') clientKey?: string) {
+    const key = clientKey && z.string().uuid().safeParse(clientKey).success ? clientKey : null;
+    return this.ops.pendingStock(this.tenant(request), this.branch(request), this.actor(request), this.header(request), key);
+  }
+
+  @Post('stock/entries/open')
+  openInventoryEntry(
+    @Req() request: AuthenticatedRequest,
+    @Body(new ZodValidationPipe(z.object({ clientKey: uuid }))) body: { clientKey: string },
+  ) {
+    return this.ops.openInventoryEntry(this.tenant(request), this.branch(request), this.actor(request), this.header(request), body.clientKey);
+  }
+
+  @Post('stock/entries')
+  saveInventoryEntry(
+    @Req() request: AuthenticatedRequest,
+    @Body(new ZodValidationPipe(inventoryEntrySchema)) body: z.infer<typeof inventoryEntrySchema>,
+  ) {
+    return this.ops.saveInventoryEntry(this.tenant(request), this.branch(request), this.actor(request), this.header(request), body);
+  }
+
   @Post('stock/receive')
   receive(
     @Req() request: AuthenticatedRequest,
@@ -332,10 +524,26 @@ export class OpsController {
           genericName: z.string().trim().min(2).max(200),
           barcode: z.string().trim().max(32).optional().default(''),
           note: z.string().trim().max(500).optional().default(''),
+          manufacturer: z.string().trim().max(200).optional().default(''),
+          strength: z.string().trim().max(80).optional().default(''),
+          packaging: z.string().trim().max(80).optional().default(''),
+          itemKind: z.enum(['GENERIC', 'BRAND']).optional().default('BRAND'),
+          itemType: z.string().trim().max(32).optional().default('Medicine'),
         }),
       ),
     )
-    body: { nameAr: string; nameEn: string; genericName: string; barcode: string; note: string },
+    body: {
+      nameAr: string;
+      nameEn: string;
+      genericName: string;
+      barcode: string;
+      note: string;
+      manufacturer: string;
+      strength: string;
+      packaging: string;
+      itemKind: 'GENERIC' | 'BRAND';
+      itemType: string;
+    },
   ) {
     return this.ops.requestCatalogItem(this.tenant(request), this.actor(request), this.branch(request), body);
   }
@@ -387,12 +595,17 @@ export class OpsController {
           priceListId: uuid,
           adjust: z.enum(['SAME', 'PCT', 'AMOUNT']).optional().default('SAME'),
           value: z.string().trim().regex(/^-?\d+(\.\d{1,2})?$/).optional().default('0.00'),
+          nameAr: z.string().trim().min(1).max(200),
+          nameEn: z.string().trim().min(1).max(200),
         }),
       ),
     )
-    body: { priceListId: string; adjust: 'SAME' | 'PCT' | 'AMOUNT'; value: string },
+    body: { priceListId: string; adjust: 'SAME' | 'PCT' | 'AMOUNT'; value: string; nameAr: string; nameEn: string },
   ) {
-    return this.ops.copyPriceList(this.tenant(request), this.actor(request), body.priceListId, body.adjust, body.value);
+    return this.ops.copyPriceList(this.tenant(request), this.actor(request), body.priceListId, body.adjust, body.value, {
+      nameAr: body.nameAr,
+      nameEn: body.nameEn,
+    });
   }
 
   @Post('prices/bulk')
@@ -435,6 +648,21 @@ export class OpsController {
     @Body(new ZodValidationPipe(z.object({ rate: moneyText }))) body: { rate: string },
   ) {
     return this.ops.saveRate(this.tenant(request), this.actor(request), body.rate);
+  }
+
+  @Post('prices/rates/propose')
+  proposeRate(
+    @Req() request: AuthenticatedRequest,
+    @Body(new ZodValidationPipe(z.object({
+      rate: moneyText,
+      action: z.enum(['preview', 'draft', 'submit', 'reject', 'approve']),
+      proposalId: uuid.optional(),
+      reason: z.string().trim().max(400).optional().default(''),
+      effectiveOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    })))
+    body: { rate: string; action: 'preview' | 'draft' | 'submit' | 'reject' | 'approve'; proposalId?: string; reason?: string; effectiveOn?: string },
+  ) {
+    return this.ops.proposeUsdRate(this.tenant(request), this.actor(request), body);
   }
 
   @Get('prices/export')
@@ -490,6 +718,37 @@ export class OpsController {
   @Get('network')
   network(@Req() request: AuthenticatedRequest) {
     return this.ops.network(this.tenant(request), this.actor(request));
+  }
+
+  @Get('suppliers')
+  supplierDesk(@Req() request: AuthenticatedRequest) {
+    return this.ops.supplierDesk(this.tenant(request), this.actor(request));
+  }
+
+  @Post('suppliers')
+  createSupplier(
+    @Req() request: AuthenticatedRequest,
+    @Body(new ZodValidationPipe(supplierSchema)) body: z.infer<typeof supplierSchema>,
+  ) {
+    return this.ops.createSupplier(this.tenant(request), this.actor(request), body);
+  }
+
+  @Put('suppliers/:id')
+  updateSupplier(
+    @Req() request: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Body(new ZodValidationPipe(supplierSchema)) body: z.infer<typeof supplierSchema>,
+  ) {
+    return this.ops.updateSupplier(this.tenant(request), this.actor(request), id, body);
+  }
+
+  @Post('suppliers/:id/active')
+  setSupplierActive(
+    @Req() request: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Body(new ZodValidationPipe(activeSchema)) body: z.infer<typeof activeSchema>,
+  ) {
+    return this.ops.setSupplierActive(this.tenant(request), this.actor(request), id, body.isActive);
   }
 
   @Post('branches')

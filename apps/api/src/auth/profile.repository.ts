@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { ROLE_PERMISSIONS, type RoleCode } from '@dawaa/shared';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -12,9 +13,12 @@ export type AuthProfile = {
     status: string;
     featureFlags: string[];
     trialEndsAt: string | null;
+    accountCode: string;
+    phone: string | null;
   };
   branch: { id: string; nameAr: string; nameEn: string | null } | null;
   role: { code: string; nameAr: string; nameEn: string } | null;
+  permissions: string[];
   network: {
     management: 'INDEPENDENT' | 'SHARED';
     branchLimit: number;
@@ -78,11 +82,16 @@ export class ProfileRepository {
           status: tenant.status,
           featureFlags: parseFlags(tenant.featureFlags),
           trialEndsAt: tenant.trialEndsAt ? tenant.trialEndsAt.toISOString() : null,
+          accountCode: tenant.accountCode,
+          phone: tenant.phone,
         },
         branch,
         role: roleLink
           ? { code: roleLink.role.code, nameAr: roleLink.role.nameAr, nameEn: roleLink.role.nameEn }
           : null,
+        permissions: roleLink && roleLink.role.code in ROLE_PERMISSIONS
+          ? [...ROLE_PERMISSIONS[roleLink.role.code as RoleCode]]
+          : [],
         network: {
           management: mode?.valueEn === 'SHARED' ? 'SHARED' : 'INDEPENDENT',
           branchLimit: tenant.branchLimit,

@@ -27,6 +27,7 @@ describeDb('tenant isolation against SQL Server', () => {
     await prisma.tenant.create({
       data: {
         id: tenantA,
+        accountCode: `T${suffix.slice(0, 8)}A`,
         type: 'INDIVIDUAL',
         status: 'TRIAL',
         tradeNameAr: 'عزل أ',
@@ -36,6 +37,7 @@ describeDb('tenant isolation against SQL Server', () => {
     await prisma.tenant.create({
       data: {
         id: tenantB,
+        accountCode: `T${suffix.slice(0, 8)}B`,
         type: 'INDIVIDUAL',
         status: 'TRIAL',
         tradeNameAr: 'عزل ب',

@@ -1,4 +1,70 @@
-import { addMoney, applyPercent, cmpMoney, money, mulMoney, roundToIncrement, subMoney } from '@dawaa/shared';
+import { addMoney, applyPercent, cmpMoney, divMoney, money, mulMoney, roundToIncrement, subMoney } from '@dawaa/shared';
+
+export type SaleUnit = 'BOX' | 'STRIP' | 'BOTTLE' | 'PIECE';
+
+export type ItemPack = {
+  outer: SaleUnit;
+  inner: 'STRIP' | 'BOTTLE' | 'PIECE';
+  perBox: number;
+  perInner: number;
+};
+
+export type SaleChoice = { unit: SaleUnit; pieces: number; divide: number };
+
+export function parseItemPack(raw: string | null | undefined): ItemPack | null {
+  if (!raw) return null;
+  try {
+    const data = JSON.parse(raw) as Partial<ItemPack>;
+    if (data.outer !== 'BOX' && data.outer !== 'STRIP' && data.outer !== 'BOTTLE' && data.outer !== 'PIECE') return null;
+    const inner = data.inner === 'BOTTLE' || data.inner === 'PIECE' ? data.inner : 'STRIP';
+    return {
+      outer: data.outer,
+      inner,
+      perBox: Math.max(1, Math.trunc(Number(data.perBox) || 1)),
+      perInner: Math.max(1, Math.trunc(Number(data.perInner) || 1)),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Selling choices for a container whose price is the whole box. `divide` is how many of that unit make one container. */
+export function saleChoices(pack: ItemPack | null): SaleChoice[] {
+  if (!pack || pack.outer === 'PIECE') return [{ unit: 'PIECE', pieces: 1, divide: 1 }];
+  if (pack.outer === 'STRIP' || pack.outer === 'BOTTLE') {
+    const pieces = Math.max(1, pack.perInner);
+    return pieces > 1
+      ? [{ unit: pack.outer, pieces, divide: 1 }, { unit: 'PIECE', pieces: 1, divide: pieces }]
+      : [{ unit: pack.outer, pieces: 1, divide: 1 }];
+  }
+  const innerPieces = pack.inner === 'PIECE' ? 1 : Math.max(1, pack.perInner);
+  const perBox = Math.max(1, pack.perBox);
+  const boxPieces = perBox * innerPieces;
+  const choices: SaleChoice[] = [{ unit: 'BOX', pieces: boxPieces, divide: 1 }];
+  if ((pack.inner === 'STRIP' || pack.inner === 'BOTTLE') && perBox > 1) {
+    choices.push({ unit: pack.inner, pieces: innerPieces, divide: perBox });
+  }
+  if (boxPieces > 1) choices.push({ unit: 'PIECE', pieces: 1, divide: boxPieces });
+  return choices;
+}
+
+export function piecesInContainer(pack: ItemPack): number {
+  return saleChoices(pack).find((choice) => choice.unit === pack.outer)?.pieces ?? 1;
+}
+
+/** The list price is the container. A strip is that price divided by the strips in the box. */
+export function containerUnitPrice(containerPrice: string, divide: number): string {
+  if (divide <= 1) return containerPrice;
+  return divMoney(containerPrice, String(divide));
+}
+
+/** A typed box cost becomes the cost of one piece, which is how stock is stored. */
+export function pieceUnitCost(containerCost: string, pack: ItemPack | null): string {
+  if (!pack) return containerCost;
+  const each = piecesInContainer(pack);
+  if (each <= 1) return containerCost;
+  return divMoney(containerCost, String(each));
+}
 
 export type LotSlice = {
   id: string;
@@ -15,8 +81,198 @@ export function khartoumDate(now = new Date()): string {
   }).format(now);
 }
 
+/** A receipt may omit the manufacturer batch. Blank and the old OPEN placeholder are stored as N/A. */
+export function manufacturerBatch(value: string | null | undefined): string {
+  const text = (value ?? '').trim();
+  if (!text || text.toUpperCase() === 'OPEN' || text.toUpperCase() === 'N/A') return 'N/A';
+  return text.slice(0, 64);
+}
+
 export function khartoumDayStart(now = new Date()): Date {
   return new Date(`${khartoumDate(now)}T00:00:00+02:00`);
+}
+
+/** Sellable stock is an available, unexpired quantity. Rejected, quarantined, and damaged lots stay on the books. */
+export function isSellableLot(
+  lot: { qtyBase: number; expiry: string; condition?: string | null },
+  today: string,
+): boolean {
+  return (lot.condition || 'AVAILABLE') === 'AVAILABLE' && lot.qtyBase > 0 && lot.expiry.slice(0, 10) >= today;
+}
+
+export type OrderBucket = { id: string; productId: string; ordered: number; received: number };
+
+/** Assign received pieces to purchase lines. Updates `received` on the buckets that were claimed. */
+export function claimReceiptQty(
+  buckets: OrderBucket[],
+  productId: string,
+  pieces: number,
+  override: boolean,
+): { id: string; take: number }[] {
+  if (!Number.isInteger(pieces) || pieces <= 0) throw new Error('QTY');
+  const scratch = buckets.map((row) => ({ ...row }));
+  const rows = scratch.filter((row) => row.productId === productId);
+  if (rows.length === 0) throw new Error('NOT_ON_ORDER');
+  let left = pieces;
+  const takes: { id: string; take: number }[] = [];
+  for (const row of rows) {
+    const room = row.ordered - row.received;
+    if (room <= 0) continue;
+    const take = Math.min(room, left);
+    if (take <= 0) continue;
+    takes.push({ id: row.id, take });
+    row.received += take;
+    left -= take;
+  }
+  if (left > 0) {
+    if (!override) throw new Error('OVER_RECEIVE');
+    const last = rows[rows.length - 1];
+    if (!last) throw new Error('NOT_ON_ORDER');
+    takes.push({ id: last.id, take: left });
+    last.received += left;
+  }
+  for (const row of scratch) {
+    const live = buckets.find((item) => item.id === row.id);
+    if (live) live.received = row.received;
+  }
+  return takes;
+}
+
+export const STOCK_PLACES = [
+  { code: 'MAIN', kind: 'PHARMACY', nameAr: 'الصيدلية الرئيسية', nameEn: 'Main Pharmacy' },
+  { code: 'A1', kind: 'SHELF', nameAr: 'رف A1', nameEn: 'Shelf A1' },
+  { code: 'B2', kind: 'SHELF', nameAr: 'رف B2', nameEn: 'Shelf B2' },
+  { code: 'FRIDGE', kind: 'FRIDGE', nameAr: 'ثلاجة', nameEn: 'Refrigerator' },
+  { code: 'CONTROLLED', kind: 'CONTROLLED', nameAr: 'تخزين مراقب', nameEn: 'Controlled Storage' },
+  { code: 'WAREHOUSE', kind: 'WAREHOUSE', nameAr: 'مخزن', nameEn: 'Warehouse' },
+] as const;
+
+export type StockCandidate = {
+  poStatus: string;
+  receiptStatus: string;
+  source: string;
+  condition: string;
+  expiry: string;
+  received: number;
+  posted: number;
+};
+
+/** Pieces still waiting to be placed on a shelf. */
+export function remainingToStock(received: number, posted: number): number {
+  if (!Number.isInteger(received) || received < 0 || !Number.isInteger(posted) || posted < 0) throw new Error('QTY');
+  return Math.max(0, received - posted);
+}
+
+/** Claim part of a received line. A second claim against the same posted quantity fails. */
+export function claimStockQty(received: number, posted: number, request: number): number {
+  if (!Number.isInteger(request) || request <= 0) throw new Error('QTY');
+  const left = remainingToStock(received, posted);
+  if (request > left) throw new Error('OVER_POST');
+  return request;
+}
+
+/**
+ * A line can be stocked only after a posted procurement goods receipt.
+ * Approval alone, drafts, cancellations, rejected or expired lines, and fully posted lines stay out.
+ */
+export function canStockReceipt(row: StockCandidate, today: string): boolean {
+  if (row.source !== 'PROCUREMENT') return false;
+  if (row.receiptStatus !== 'POSTED') return false;
+  if (row.poStatus !== 'PARTIAL' && row.poStatus !== 'RECEIVED') return false;
+  if (row.condition !== 'AVAILABLE') return false;
+  const expiry = row.expiry.slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(expiry) || expiry < today) return false;
+  return remainingToStock(row.received, row.posted) > 0;
+}
+
+export function inventoryDocNo(year: number, sequence: number): string {
+  if (!Number.isInteger(year) || year < 2000 || year > 9999) throw new Error('QTY');
+  if (!Number.isInteger(sequence) || sequence < 1 || sequence > 999999) throw new Error('QTY');
+  return `INV-${year}-${String(sequence).padStart(6, '0')}`;
+}
+
+export function stockingLabel(
+  received: number,
+  posted: number,
+  condition: string,
+): 'PENDING' | 'PARTIAL' | 'STOCKED' | 'REJECTED' | 'QUARANTINE' {
+  if (condition === 'QUARANTINE') return 'QUARANTINE';
+  if (condition === 'REJECTED' || condition === 'DAMAGED') return 'REJECTED';
+  if (posted <= 0) return 'PENDING';
+  if (posted < received) return 'PARTIAL';
+  return 'STOCKED';
+}
+
+export function orderStockState(
+  lines: { condition: string; received: number; posted: number }[],
+): 'NONE' | 'PENDING' | 'PARTIAL' | 'STOCKED' | 'REJECTED' {
+  const rows = lines.filter((line) => line.received > 0 && line.condition === 'AVAILABLE');
+  if (rows.length === 0) {
+    if (lines.some((line) => line.condition === 'QUARANTINE' || line.condition === 'REJECTED' || line.condition === 'DAMAGED')) {
+      return 'REJECTED';
+    }
+    return 'NONE';
+  }
+  if (rows.every((line) => line.posted >= line.received)) return 'STOCKED';
+  if (rows.every((line) => line.posted === 0)) return 'PENDING';
+  return 'PARTIAL';
+}
+
+export type StockingSummary = {
+  pendingReceipts: number;
+  receivedLines: number;
+  awaitingPosting: number;
+  fullyStocked: number;
+  pendingQty: number;
+};
+
+/** Shared counts for the procurement and inventory screens. */
+export function summarizeStocking(input: { orders: { status: string }[]; lines: StockCandidate[]; today: string }): StockingSummary {
+  const received = input.lines.filter(
+    (line) => line.source === 'PROCUREMENT' && line.receiptStatus === 'POSTED' && (line.poStatus === 'PARTIAL' || line.poStatus === 'RECEIVED'),
+  );
+  const awaiting = received.filter((line) => canStockReceipt(line, input.today));
+  return {
+    pendingReceipts: input.orders.filter((order) => order.status === 'ORDERED' || order.status === 'PARTIAL').length,
+    receivedLines: received.length,
+    awaitingPosting: awaiting.length,
+    fullyStocked: received.filter((line) => line.condition === 'AVAILABLE' && line.received > 0 && line.posted >= line.received).length,
+    pendingQty: awaiting.reduce((sum, line) => sum + remainingToStock(line.received, line.posted), 0),
+  };
+}
+
+export function normalizePlace(value: string): string {
+  const text = value.trim();
+  const hit = STOCK_PLACES.find((place) => place.code === text || place.nameAr === text || place.nameEn.toLowerCase() === text.toLowerCase());
+  if (hit) return hit.code;
+  if (text === 'ثلاجة') return 'FRIDGE';
+  if (text === 'مخزن') return 'WAREHOUSE';
+  if (text === 'رف') return 'A1';
+  return '';
+}
+
+export function storageNeed(hint: string): 'COLD' | 'CONTROLLED' | 'NORMAL' {
+  if (/ثلاج|مبرد|تبريد|لقاح|أنسولين|إنسولين|انسولين|مصل|vaccine|insulin|immunoglobulin|interferon|oxytocin|refriger|cold|2\s*[-–to]+\s*8/i.test(hint)) {
+    return 'COLD';
+  }
+  if (/مراقب|مخدر|narcotic|controlled|psychotropic/i.test(hint)) return 'CONTROLLED';
+  return 'NORMAL';
+}
+
+export function suggestPlace(hint: string, previous: string | null): string {
+  const known = previous ? normalizePlace(previous) : '';
+  if (known) return known;
+  const need = storageNeed(hint);
+  if (need === 'COLD') return 'FRIDGE';
+  if (need === 'CONTROLLED') return 'CONTROLLED';
+  if (/مخزن|warehouse/i.test(hint)) return 'WAREHOUSE';
+  return 'MAIN';
+}
+
+export function placeCompatible(need: 'COLD' | 'CONTROLLED' | 'NORMAL', code: string): boolean {
+  if (need === 'COLD') return code === 'FRIDGE';
+  if (need === 'CONTROLLED') return code === 'CONTROLLED';
+  return true;
 }
 
 /** Earliest unexpired batch first. Expired stock is never allocated. */
@@ -87,6 +343,62 @@ export function nextPrice(input: {
   if (input.rounding === 'NONE') return money(next);
   const stepped = input.roundMode === 'UP' ? roundUp(next, input.rounding) : roundToIncrement(next, input.rounding);
   return money(stepped);
+}
+
+export type ReceiptCostLine = { qty: number; unitCost: string };
+
+/** SDG net unit cost from the currency entered at receipt. Later rate changes do not revise this. */
+export function allocateReceiptCosts(
+  lines: ReceiptCostLine[],
+  header: { currency: 'SDG' | 'USD'; rate: string; discount: string; tax: string; charges: string },
+): { sdgUnit: string; sdgTotal: string; foreignUnit: string }[] {
+  if (header.currency === 'USD' && cmpMoney(header.rate || '0.00', '0.00') <= 0) throw new Error('RATE');
+  const rate = header.currency === 'USD' ? money(header.rate) : '1.00';
+  const grosses = lines.map((line) => {
+    if (!Number.isInteger(line.qty) || line.qty <= 0) throw new Error('QTY');
+    const foreign = money(line.unitCost);
+    const sdg = header.currency === 'USD' ? mulMoney(foreign, rate) : foreign;
+    return mulMoney(sdg, String(line.qty));
+  });
+  const grossTotal = grosses.reduce((sum, gross) => addMoney(sum, gross), '0.00');
+  const discount = money(header.discount || '0.00');
+  const tax = money(header.tax || '0.00');
+  const charges = money(header.charges || '0.00');
+  let usedDiscount = '0.00';
+  let usedTax = '0.00';
+  let usedCharges = '0.00';
+  return lines.map((line, index) => {
+    const last = index === lines.length - 1;
+    const share = (pool: string, used: string) => {
+      if (last) return subMoney(pool, used);
+      if (cmpMoney(grossTotal, '0.00') <= 0) return '0.00';
+      return divMoney(mulMoney(pool, grosses[index]), grossTotal);
+    };
+    const lineDiscount = share(discount, usedDiscount);
+    const lineTax = share(tax, usedTax);
+    const lineCharges = share(charges, usedCharges);
+    usedDiscount = addMoney(usedDiscount, lineDiscount);
+    usedTax = addMoney(usedTax, lineTax);
+    usedCharges = addMoney(usedCharges, lineCharges);
+    const net = addMoney(addMoney(subMoney(grosses[index], lineDiscount), lineTax), lineCharges);
+    if (cmpMoney(net, '0.00') < 0) throw new Error('COST');
+    return {
+      foreignUnit: money(line.unitCost),
+      sdgTotal: net,
+      sdgUnit: divMoney(net, String(line.qty)),
+    };
+  });
+}
+
+/** Selling price when the USD base already includes markup and no extra rounding applies. */
+export function usdSellingPrice(baseUsd: string, rate: string): string | null {
+  if (cmpMoney(baseUsd || '0.00', '0.00') <= 0 || cmpMoney(rate || '0.00', '0.00') <= 0) return null;
+  return mulMoney(money(baseUsd), money(rate));
+}
+
+export function priceChangePct(oldPrice: string, newPrice: string): string {
+  if (cmpMoney(oldPrice || '0.00', '0.00') <= 0) return '0.00';
+  return mulMoney(divMoney(subMoney(newPrice, oldPrice), oldPrice), '100');
 }
 
 function shiftMonths(iso: string, months: number): string {
@@ -167,10 +479,11 @@ export type HomeBoard = {
   lowStock: { id: string; nameAr: string; nameEn: string; qty: number; reorderLevel: number }[];
   expiry: { nameAr: string; nameEn: string; batchNo: string; expiry: string; qty: number; daysLeft: number }[];
   purchases: { docNo: string; supplierAr: string; supplierEn: string; orderedAt: string; total: string; status: string }[];
+  stocking: StockingSummary & { availableQty: number; newlyStocked: number } | null;
   sales: { soldAt: string; docNo: string; customerName: string; total: string; paymentMethod: string; status: string }[];
   accounts: { receiptsToday: string; paymentsToday: string; customerDue: string; supplierDue: string };
   customers: { nameAr: string; nameEn: string; balance: string }[];
-  products: { id: string; nameAr: string; nameEn: string; genericName: string; sku: string; form: string; sellPrice: string; qty: number }[];
+  products: { id: string; nameAr: string; nameEn: string; genericName: string; sku: string; form: string; sellPrice: string; qty: number; pack: ItemPack | null }[];
 };
 
 export function buildHome(input: {
@@ -182,7 +495,8 @@ export function buildHome(input: {
   suppliers: { balance: string }[];
   customers: { nameAr: string; nameEn: string; balance: string }[];
   lots: { branchId: string; productId: string; batchNo: string; expiry: string; qtyBase: number }[];
-  products: { id: string; nameAr: string; nameEn: string; genericName: string; sku: string; form: string; sellPrice: string; qty: number; reorderLevel: number }[];
+  products: { id: string; nameAr: string; nameEn: string; genericName: string; sku: string; form: string; sellPrice: string; qty: number; reorderLevel: number; pack?: ItemPack | null }[];
+  stocking?: (StockingSummary & { availableQty: number; newlyStocked: number }) | null;
 }): HomeBoard {
   const month = input.today.slice(0, 7);
   const dates = daySpan(input.today, 7);
@@ -303,6 +617,7 @@ export function buildHome(input: {
       })),
     accounts: { receiptsToday: salesToday, paymentsToday, customerDue, supplierDue },
     customers: input.customers,
+    stocking: input.stocking ?? null,
     products: input.products.map((product) => ({
       id: product.id,
       nameAr: product.nameAr,
@@ -312,6 +627,7 @@ export function buildHome(input: {
       form: product.form,
       sellPrice: product.sellPrice,
       qty: product.qty,
+      pack: product.pack ?? null,
     })),
   };
 }
@@ -353,6 +669,16 @@ export function renewAmount(amount: string, adjust: RenewAdjust, value: string):
   const next = adjust === 'PCT' ? applyPercent(base, value) : addMoney(base, value);
   if (cmpMoney(next, '0.00') <= 0) throw new Error('PRICE');
   return next;
+}
+
+/**
+ * A new list starts after the list already used in sales.
+ * A copy may keep that same date, and then it replaces the current list.
+ */
+export function priceListDateGate(input: { nextOn: string; currentOn: string | null; copied: boolean }): 'ok' | 'PRICE_DATE' {
+  if (!input.currentOn || input.nextOn > input.currentOn) return 'ok';
+  if (input.nextOn === input.currentOn && input.copied) return 'ok';
+  return 'PRICE_DATE';
 }
 
 /** Which price-list buttons the server allows. Editing stays on an unused draft. */

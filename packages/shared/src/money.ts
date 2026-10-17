@@ -38,6 +38,13 @@ export function mulMoney(amount: string, qty: string): string {
   return parseDecimal(amount, 'amount').times(parseDecimal(qty, 'qty')).toFixed(SCALE);
 }
 
+/** Split an amount across a positive quantity. Half-up to cents. */
+export function divMoney(amount: string, qty: string): string {
+  const parts = parseDecimal(qty, 'qty');
+  if (parts.lte(0)) throw new MoneyError('qty must be positive');
+  return parseDecimal(amount, 'amount').div(parts).toFixed(SCALE);
+}
+
 /** Price after a signed percent. `15` is +15%, `-10` is −10%. */
 export function applyPercent(amount: string, percentPoints: string): string {
   const base = parseDecimal(amount, 'amount');

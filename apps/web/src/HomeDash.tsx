@@ -2,11 +2,56 @@ import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { api, type HomeBoard, type ReceiptPreview } from './api';
+import { LibraryRequest } from './library-request';
 import { ReceiptSlip } from './ReceiptPage';
 import { formatKhartoum, formatMoney, lineAmount, percentAmount, subAmount, sumAmounts } from './locale';
 import { useUi } from './ui';
 
-type CartLine = { productId: string; name: string; unit: string; qty: number; price: string; stock: number };
+type SaleUnit = 'BOX' | 'STRIP' | 'BOTTLE' | 'PIECE';
+type ItemPack = NonNullable<HomeBoard['products'][number]['pack']>;
+type SaleChoice = { unit: SaleUnit; pieces: number; divide: number };
+type CartLine = {
+  key: string;
+  productId: string;
+  name: string;
+  unit: string;
+  unitCode: SaleUnit;
+  pieces: number;
+  qty: number;
+  price: string;
+  stock: number;
+};
+
+const UNIT_KEY: Record<SaleUnit, 'packBox' | 'packStrip' | 'packBottle' | 'packPiece'> = {
+  BOX: 'packBox',
+  STRIP: 'packStrip',
+  BOTTLE: 'packBottle',
+  PIECE: 'packPiece',
+};
+
+function saleChoices(pack: ItemPack | null | undefined): SaleChoice[] {
+  if (!pack || pack.outer === 'PIECE') return [{ unit: 'PIECE', pieces: 1, divide: 1 }];
+  if (pack.outer === 'STRIP' || pack.outer === 'BOTTLE') {
+    const pieces = Math.max(1, pack.perInner);
+    return pieces > 1
+      ? [{ unit: pack.outer, pieces, divide: 1 }, { unit: 'PIECE', pieces: 1, divide: pieces }]
+      : [{ unit: pack.outer, pieces: 1, divide: 1 }];
+  }
+  const innerPieces = pack.inner === 'PIECE' ? 1 : Math.max(1, pack.perInner);
+  const perBox = Math.max(1, pack.perBox);
+  const boxPieces = perBox * innerPieces;
+  const choices: SaleChoice[] = [{ unit: 'BOX', pieces: boxPieces, divide: 1 }];
+  if ((pack.inner === 'STRIP' || pack.inner === 'BOTTLE') && perBox > 1) choices.push({ unit: pack.inner, pieces: innerPieces, divide: perBox });
+  if (boxPieces > 1) choices.push({ unit: 'PIECE', pieces: 1, divide: boxPieces });
+  return choices;
+}
+
+function unitPrice(amount: string, divide: number): string {
+  if (divide <= 1) return amount;
+  const cents = Math.round(Number(amount) * 100);
+  if (!Number.isFinite(cents)) return amount;
+  return (Math.round(cents / divide) / 100).toFixed(2);
+}
 
 export function HomeDash() {
   const { t } = useTranslation();
@@ -39,6 +84,14 @@ export function HomeDash() {
         <Kpi tone="watch" label={t('lowDrugs')} value={String(home.lowCount)} note={t('reorderAction')} />
         <Kpi tone="bad" label={t('expiredDrugs')} value={String(home.expiredCount)} note={t('expiryAlerts')} />
       </section>
+      {home.stocking ? (
+        <section className="kpi-row">
+          <Kpi tone="watch" label={t('buyPendingReceipts')} value={String(home.stocking.pendingReceipts)} note={t('poApproved')} />
+          <Kpi tone="info" label={t('buyReceived')} value={String(home.stocking.receivedLines)} note={t('procurement')} />
+          <Kpi tone="watch" label={t('invReady')} value={String(home.stocking.awaitingPosting)} note={String(home.stocking.pendingQty)} />
+          <Kpi tone="ok" label={t('invOnHand')} value={String(home.stocking.availableQty)} note={t('invNewStock') + ' ' + home.stocking.newlyStocked} />
+        </section>
+      ) : null}
       <div className="dash-body">
         <QuickPos home={home} onSold={() => setTick((value) => value + 1)} />
         <div className="dash-main">
@@ -228,7 +281,7 @@ export function HomeDash() {
                         <td>{order.docNo}</td>
                         <td>{arabic ? order.supplierAr : order.supplierEn}</td>
                         <td>{money(order.total)}</td>
-                        <td>{order.status}</td>
+                        <td>{order.status === 'ORDERED' ? t('poApproved') : order.status === 'PARTIAL' ? t('poPartialRecv') : order.status === 'RECEIVED' ? t('poReceived') : order.status === 'CANCELLED' ? t('poCancelled') : order.status === 'DRAFT' ? t('poDraft') : order.status}</td>
                       </tr>
                     ))
                   )}
@@ -290,6 +343,8 @@ function QuickPos({ home, onSold }: { home: HomeBoard; onSold: () => void }) {
   const { t } = useTranslation();
   const ui = useUi();
   const [query, setQuery] = useState('');
+  const [libraryNames, setLibraryNames] = useState<string[]>([]);
+  const [libraryMiss, setLibraryMiss] = useState(false);
   const [lines, setLines] = useState<CartLine[]>([]);
   const [discountPct, setDiscountPct] = useState('0');
   const [customerName, setCustomerName] = useState('');
@@ -300,36 +355,69 @@ function QuickPos({ home, onSold }: { home: HomeBoard; onSold: () => void }) {
   const allBranches = localStorage.getItem('dawaa.branch') === 'all';
   const arabic = ui.language.startsWith('ar');
 
+  useEffect(() => {
+    const needle = query.trim();
+    if (needle.length < 2) {
+      setLibraryNames([]);
+      setLibraryMiss(false);
+      return;
+    }
+    const handle = window.setTimeout(() => {
+      api<{ genericName: string; nameAr: string; nameEn: string; code: string; aliases?: string[] }[]>(
+        `/api/v1/ops/catalog?q=${encodeURIComponent(needle)}`,
+      )
+        .then((rows) => {
+          const list = Array.isArray(rows) ? rows : [];
+          setLibraryNames(list.flatMap((row) => [row.genericName, row.nameAr, row.nameEn, row.code, ...(row.aliases ?? [])]));
+          setLibraryMiss(list.length === 0);
+        })
+        .catch(() => {
+          setLibraryNames([]);
+          setLibraryMiss(false);
+        });
+    }, 200);
+    return () => window.clearTimeout(handle);
+  }, [query]);
+
   const matches = useMemo(() => {
     const needle = query.trim().toLowerCase();
     if (!needle) return [];
+    const extra = new Set(libraryNames.map((value) => value.toLowerCase()));
     return home.products
-      .filter((product) =>
-        [product.nameAr, product.nameEn, product.genericName, product.sku].some((value) => value.toLowerCase().includes(needle)),
-      )
+      .filter((product) => {
+        const own = [product.nameAr, product.nameEn, product.genericName, product.sku].some((value) => value.toLowerCase().includes(needle));
+        return own || extra.has(product.genericName.toLowerCase()) || extra.has(product.sku.toLowerCase());
+      })
       .slice(0, 6);
-  }, [home.products, query]);
+  }, [home.products, libraryNames, query]);
 
-  function addProduct(product: HomeBoard['products'][number]) {
-    if (product.qty <= 0) {
-      ui.push({ tone: 'urgent', title: t('quickPos'), body: t('stockShort') });
-      return;
-    }
+  function addUnit(product: HomeBoard['products'][number], choice: SaleChoice) {
     if (product.sellPrice === '0' || product.sellPrice === '0.00') {
       ui.push({ tone: 'urgent', title: t('quickPos'), body: t('noPrice') });
       return;
     }
+    const held = lines.filter((line) => line.productId === product.id).reduce((sum, line) => sum + line.qty * line.pieces, 0);
+    if (product.qty - held < choice.pieces) {
+      ui.push({ tone: 'urgent', title: t('quickPos'), body: t('stockShort') });
+      return;
+    }
     const name = arabic ? product.nameAr : product.nameEn;
+    const word = t(UNIT_KEY[choice.unit]);
+    const key = `${product.id}:${choice.unit}`;
     setLines((current) => {
-      const found = current.find((line) => line.productId === product.id);
-      if (found) {
-        if (found.qty >= product.qty) return current;
-        return current.map((line) => (line.productId === product.id ? { ...line, qty: line.qty + 1 } : line));
-      }
-      return [...current, { productId: product.id, name, unit: product.form, qty: 1, price: product.sellPrice, stock: product.qty }];
+      const used = current.filter((line) => line.productId === product.id).reduce((sum, line) => sum + line.qty * line.pieces, 0);
+      if (product.qty - used < choice.pieces) return current;
+      const found = current.find((line) => line.key === key);
+      if (found) return current.map((line) => (line.key === key ? { ...line, qty: line.qty + 1 } : line));
+      return [...current, { key, productId: product.id, name, unit: word, unitCode: choice.unit, pieces: choice.pieces, qty: 1, price: unitPrice(product.sellPrice, choice.divide), stock: product.qty }];
     });
     setQuery('');
     setSlip(null);
+  }
+
+  function addProduct(product: HomeBoard['products'][number]) {
+    const choices = saleChoices(product.pack);
+    if (choices.length === 1) addUnit(product, choices[0]);
   }
 
   const subtotal = sumAmounts(lines.map((line) => lineAmount(line.price, line.qty)));
@@ -349,7 +437,7 @@ function QuickPos({ home, onSold }: { home: HomeBoard; onSold: () => void }) {
           discount,
           paid: total,
           paymentMethod,
-          lines: lines.map((line) => ({ productId: line.productId, qty: line.qty })),
+          lines: lines.map((line) => ({ productId: line.productId, qty: line.qty, unit: line.unitCode })),
         }),
       });
       setProgress(100);
@@ -399,34 +487,59 @@ function QuickPos({ home, onSold }: { home: HomeBoard; onSold: () => void }) {
       </label>
       {matches.length > 0 ? (
         <div className="pos-hits">
-          {matches.map((product) => (
-            <button className="pos-hit" type="button" key={product.id} onClick={() => addProduct(product)}>
+          {matches.map((product) => {
+            const choices = saleChoices(product.pack);
+            const title = (
               <span className="pick-name">
                 <strong>{arabic ? product.nameAr : product.nameEn}</strong>
                 <small>
                   {product.form} · {t('inStock')} {product.qty}
                 </small>
               </span>
-              <b>
-                {formatMoney(product.sellPrice)} {t('sdg')}
-              </b>
-            </button>
-          ))}
+            );
+            if (choices.length > 1) {
+              return (
+                <div className="pos-hit pack" key={product.id}>
+                  {title}
+                  <div className="pos-units">
+                    {choices.map((choice) => (
+                      <button key={choice.unit} type="button" onClick={() => addUnit(product, choice)}>
+                        {t(UNIT_KEY[choice.unit])} · {formatMoney(unitPrice(product.sellPrice, choice.divide))}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              );
+            }
+            return (
+              <button className="pos-hit" type="button" key={product.id} onClick={() => addProduct(product)}>
+                {title}
+                <b>
+                  {formatMoney(product.sellPrice)} {t('sdg')}
+                </b>
+              </button>
+            );
+          })}
         </div>
       ) : null}
+      {query.trim().length >= 2 && matches.length === 0 && libraryNames.length > 0 ? <p className="lede">{t('libraryNotStock')}</p> : null}
+      {query.trim().length >= 2 && matches.length === 0 && libraryMiss ? <LibraryRequest query={query} /> : null}
       {lines.length === 0 ? (
         <p className="lede pos-empty">{t('posEmpty')}</p>
       ) : (
         <ul className="pos-lines">
           {lines.map((line) => (
-            <li className="pos-line" key={line.productId}>
+            <li className="pos-line" key={line.key}>
               <div className="pos-line-top">
-                <strong title={line.name}>{line.name}</strong>
+                <strong title={line.name}>
+                  {line.name}
+                  {line.unitCode !== 'PIECE' || line.pieces > 1 ? <small> · {line.unit}</small> : null}
+                </strong>
                 <button
                   className="chosen-x"
                   type="button"
                   aria-label="×"
-                  onClick={() => setLines(lines.filter((item) => item.productId !== line.productId))}
+                  onClick={() => setLines(lines.filter((item) => item.key !== line.key))}
                 >
                   ×
                 </button>
@@ -435,9 +548,7 @@ function QuickPos({ home, onSold }: { home: HomeBoard; onSold: () => void }) {
                 <span className="stepper">
                   <button
                     type="button"
-                    onClick={() =>
-                      setLines(lines.flatMap((item) => (item.productId === line.productId ? (item.qty <= 1 ? [] : [{ ...item, qty: item.qty - 1 }]) : [item])))
-                    }
+                    onClick={() => setLines(lines.flatMap((item) => (item.key === line.key ? (item.qty <= 1 ? [] : [{ ...item, qty: item.qty - 1 }]) : [item])))}
                   >
                     −
                   </button>
@@ -445,7 +556,13 @@ function QuickPos({ home, onSold }: { home: HomeBoard; onSold: () => void }) {
                   <button
                     type="button"
                     onClick={() =>
-                      setLines(lines.map((item) => (item.productId === line.productId && item.qty < item.stock ? { ...item, qty: item.qty + 1 } : item)))
+                      setLines(
+                        lines.map((item) => {
+                          if (item.key !== line.key) return item;
+                          const held = lines.filter((row) => row.productId === item.productId && row.key !== item.key).reduce((sum, row) => sum + row.qty * row.pieces, 0);
+                          return item.qty * item.pieces + held + item.pieces <= item.stock ? { ...item, qty: item.qty + 1 } : item;
+                        }),
+                      )
                     }
                   >
                     +

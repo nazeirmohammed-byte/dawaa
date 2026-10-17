@@ -11,7 +11,7 @@ import { config } from 'dotenv';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { seedOperationsBoard } from './board-seed';
-import { ensureBranchNetwork, ensurePriceLists, seedPharmacyOperations, seedStandardMedicines } from './ops-seed';
+import { ensureBranchNetwork, ensureDemoCatalog, ensurePriceLists, ensureSudanSuppliers, seedPharmacyOperations, seedStandardMedicines } from './ops-seed';
 import { PrismaClient } from './generated/client';
 
 config({ path: resolve(__dirname, '../../../.env') });
@@ -41,6 +41,9 @@ async function main(): Promise<void> {
     await seedPlatformAdmin(prisma);
     const existing = await prisma.tenant.findFirst({ where: { email } });
     if (existing) {
+      if (!existing.accountCode) {
+        await prisma.tenant.update({ where: { id: existing.id }, data: { accountCode: 'DW0001' } });
+      }
       const passwordHash = await hash(password, ARGON2_OPTIONS);
       await prisma.$transaction(async (tx) => {
         await tx.$executeRaw`EXEC sp_set_session_context @key = N'TenantId', @value = ${existing.id}, @read_only = 0`;
@@ -48,9 +51,19 @@ async function main(): Promise<void> {
           where: { tenantId: existing.id, isDeleted: false },
           orderBy: { createdAt: 'asc' },
         });
+        await tx.tenant.update({
+          where: { id: existing.id },
+          data: { phone: '0912345678' },
+        });
+        await tx.user.updateMany({
+          where: { tenantId: existing.id, email, isDeleted: false },
+          data: { phone: '0912345678', passwordHash },
+        });
+        await ensureSudanSuppliers(tx, existing.id);
         if (branch) {
           await seedOperationsBoard(tx, existing.id, branch.id);
           await seedPharmacyOperations(tx, existing.id, branch.id, passwordHash);
+          await ensureDemoCatalog(tx, existing.id, branch.id);
           await ensureBranchNetwork(tx, existing.id);
           await ensurePriceLists(tx, existing.id);
         }
@@ -72,13 +85,14 @@ async function main(): Promise<void> {
       await tx.tenant.create({
         data: {
           id: tenantId,
+          accountCode: 'DW0001',
           type: 'INDIVIDUAL',
           dbMode: 'SHARED',
           status: 'TRIAL',
           tradeNameAr: 'صيدلية النيل',
           tradeNameEn: 'Nile Pharmacy',
           licenseNumber: 'SD-KH-DEMO-001',
-          phone: '+249912345678',
+          phone: '0912345678',
           email,
           featureFlags: JSON.stringify(['POS', 'INVENTORY', 'EXPIRY', 'PRICING', 'BASIC_REPORTS']),
           trialEndsAt,
@@ -95,7 +109,7 @@ async function main(): Promise<void> {
           isHeadOffice: true,
           state: 'الخرطوم',
           city: 'الخرطوم',
-          phone: '+249912345678',
+          phone: '0912345678',
         },
       });
 
@@ -151,7 +165,7 @@ async function main(): Promise<void> {
           id: userId,
           tenantId,
           email,
-          phone: '+249912345678',
+          phone: '0912345678',
           passwordHash,
           displayName: 'أمين النيل',
           isActive: true,
@@ -170,6 +184,8 @@ async function main(): Promise<void> {
 
       await seedOperationsBoard(tx, tenantId, branchId);
       await seedPharmacyOperations(tx, tenantId, branchId, passwordHash);
+      await ensureSudanSuppliers(tx, tenantId);
+      await ensureDemoCatalog(tx, tenantId, branchId);
       await ensureBranchNetwork(tx, tenantId);
       await ensurePriceLists(tx, tenantId);
 
@@ -196,7 +212,8 @@ async function main(): Promise<void> {
 }
 
 async function seedPlatformAdmin(prisma: PrismaClient): Promise<void> {
-  const email = process.env.PLATFORM_ADMIN_EMAIL ?? 'admin@dawaa.local';
+  const phone = process.env.PLATFORM_ADMIN_PHONE?.trim() || '0915138500';
+  const email = process.env.PLATFORM_ADMIN_EMAIL?.trim() || `super+${phone}@dwaa.local`;
   const password = process.env.PLATFORM_ADMIN_PASSWORD;
   if (!password || password.length < 10) {
     console.log('PLATFORM_ADMIN_PASSWORD missing; platform admin not seeded.');
@@ -204,17 +221,26 @@ async function seedPlatformAdmin(prisma: PrismaClient): Promise<void> {
   }
   const role = await prisma.platformRole.findUnique({ where: { code: 'SUPER_ADMIN' } });
   if (!role) throw new Error('Platform roles are missing. Apply infra/sql/010_platform.sql first.');
-  const found = await prisma.platformUser.findUnique({ where: { email } });
-  if (found) return;
+  const passwordHash = await hash(password, ARGON2_OPTIONS);
+  const found = await prisma.platformUser.findFirst({ where: { OR: [{ phone }, { email }] } });
+  if (found) {
+    await prisma.platformUser.update({
+      where: { id: found.id },
+      data: { phone, email, passwordHash, isActive: true },
+    });
+    console.log(`Updated platform admin ${phone}.`);
+    return;
+  }
   await prisma.platformUser.create({
     data: {
       email,
+      phone,
       displayName: 'مدير المنصة',
-      passwordHash: await hash(password, ARGON2_OPTIONS),
+      passwordHash,
       roleId: role.id,
     },
   });
-  console.log(`Seeded platform admin ${email}.`);
+  console.log(`Seeded platform admin ${phone}.`);
 }
 
 main().catch((error: unknown) => {

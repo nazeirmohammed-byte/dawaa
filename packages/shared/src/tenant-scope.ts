@@ -17,6 +17,11 @@ export const TENANT_SCOPED_MODELS = [
   'Supplier',
   'PurchaseOrder',
   'PurchaseLine',
+  'GoodsReceipt',
+  'GoodsReceiptLine',
+  'InventoryEntry',
+  'InventoryEntryLine',
+  'StorageLocation',
   'Customer',
   'Sale',
   'SaleLine',
@@ -31,6 +36,10 @@ export const TENANT_SCOPED_MODELS = [
   'ExchangeRate',
   'PriceListChangeBatch',
   'PriceHistory',
+  'AlertCase',
+  'AlertEvent',
+  'AlertNotice',
+  'AlertPreference',
 ] as const;
 
 export type TenantScopedModel = (typeof TENANT_SCOPED_MODELS)[number];
@@ -54,6 +63,11 @@ export const TENANT_TABLES = [
   'Suppliers',
   'PurchaseOrders',
   'PurchaseLines',
+  'GoodsReceipts',
+  'GoodsReceiptLines',
+  'InventoryEntries',
+  'InventoryEntryLines',
+  'StorageLocations',
   'Customers',
   'Sales',
   'SaleLines',
@@ -68,6 +82,10 @@ export const TENANT_TABLES = [
   'ExchangeRates',
   'PriceListChangeBatches',
   'PriceHistories',
+  'AlertCases',
+  'AlertEvents',
+  'AlertNotices',
+  'AlertPreferences',
 ] as const;
 
 const SCOPED = new Set<string>(TENANT_SCOPED_MODELS);

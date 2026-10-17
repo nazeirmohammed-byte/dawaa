@@ -20,6 +20,6 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Users_email' AND obje
   CREATE UNIQUE INDEX UX_Users_email ON dbo.Users(email) WHERE email IS NOT NULL AND isDeleted = 0;
 GO
 
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Users_phone' AND object_id = OBJECT_ID(N'dbo.Users'))
-  CREATE UNIQUE INDEX UX_Users_phone ON dbo.Users(phone) WHERE phone IS NOT NULL AND isDeleted = 0;
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Users_tenant_phone' AND object_id = OBJECT_ID(N'dbo.Users'))
+  CREATE UNIQUE INDEX UX_Users_tenant_phone ON dbo.Users(tenantId, phone) WHERE phone IS NOT NULL AND isDeleted = 0;
 GO

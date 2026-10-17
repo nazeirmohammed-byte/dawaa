@@ -1,11 +1,11 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { SubscribePage } from '../../admin/src/screens';
-import { AlertsPage, DashboardPage, Shell } from './DashboardPage';
+import { AccountPage, AlertsPage, DashboardPage, Shell } from './DashboardPage';
+import { ReportsHub } from './ReportsHub';
 import { BranchesPage, CustomersPage, PosPage, PrescriptionsPage } from './HomeDash';
 import { LoginPage } from './LoginPage';
 import { PlatformHost } from './PlatformHost';
-import { FinancePage, InventoryPage, PricesPage, PurchasingPage, ReportsPage, SalesPage, SettingsPage, UsersPage } from './modules';
-import { ReceiptPage } from './ReceiptPage';
+import { FinancePage, InventoryPage, PricesPage, PurchasingPage, SalesPage, SettingsPage, UsersPage } from './modules';
 
 export function App() {
   return (
@@ -29,21 +29,15 @@ export function App() {
           </Shell>
         }
       />
-      <Route
-        path="/app/receipt"
-        element={
-          <Shell>
-            <ReceiptPage />
-          </Shell>
-        }
-      />
+      <Route path="/app/receipt" element={<Navigate to="/app/settings#receipt" replace />} />
       <Route path="/app/inventory" element={<Shell><InventoryPage /></Shell>} />
       <Route path="/app/prices" element={<Shell><PricesPage /></Shell>} />
       <Route path="/app/pos" element={<Shell><PosPage /></Shell>} />
       <Route path="/app/sales" element={<Shell><SalesPage /></Shell>} />
       <Route path="/app/purchasing" element={<Shell><PurchasingPage /></Shell>} />
       <Route path="/app/finance" element={<Shell><FinancePage /></Shell>} />
-      <Route path="/app/reports" element={<Shell><ReportsPage /></Shell>} />
+      <Route path="/app/reports" element={<Shell><ReportsHub /></Shell>} />
+      <Route path="/app/account" element={<Shell><AccountPage /></Shell>} />
       <Route path="/app/users" element={<Shell><UsersPage /></Shell>} />
       <Route path="/app/settings" element={<Shell><SettingsPage /></Shell>} />
       <Route path="/app/customers" element={<Shell><CustomersPage /></Shell>} />

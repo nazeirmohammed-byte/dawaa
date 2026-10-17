@@ -125,12 +125,18 @@ Write-Host 'Applying row-level security, login procedure, grants, and checks...'
 Invoke-SqlFile (Join-Path $root 'infra\sql\008_prices.sql')
 Invoke-SqlFile (Join-Path $root 'infra\sql\009_catalog_price_stock.sql')
 Invoke-SqlFile (Join-Path $root 'infra\sql\010_platform.sql')
+Invoke-SqlFile (Join-Path $root 'infra\sql\011_tenant_login.sql')
 Invoke-SqlFile (Join-Path $root 'infra\sql\001_rls.sql')
 Invoke-SqlFile (Join-Path $root 'infra\sql\002_auth_lookup.sql')
 Invoke-SqlFile (Join-Path $root 'infra\sql\003_grants.sql')
 Invoke-SqlFile (Join-Path $root 'infra\sql\004_checks.sql')
 Invoke-SqlFile (Join-Path $root 'infra\sql\005_ops_checks.sql')
 Invoke-SqlFile (Join-Path $root 'infra\sql\007_branch_limit.sql')
+Invoke-SqlFile (Join-Path $root 'infra\sql\012_goods_receipts.sql')
+Invoke-SqlFile (Join-Path $root 'infra\sql\014_place_check.sql')
+Invoke-SqlFile (Join-Path $root 'infra\sql\017_global_library.sql')
+Invoke-SqlFile (Join-Path $root 'infra\sql\018_optional_batch.sql')
+Invoke-SqlFile (Join-Path $root 'infra\sql\019_supplier_batches.sql')
 
 Write-Host 'Seeding demo tenant...'
 corepack pnpm --filter @dawaa/shared build

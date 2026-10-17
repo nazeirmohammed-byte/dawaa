@@ -64,7 +64,13 @@ export const ROLE_PERMISSIONS: Record<RoleCode, readonly PermissionCode[]> = {
 };
 
 export const loginSchema = z.object({
-  identifier: z.string().trim().min(3).max(320),
+  tenantCode: z.string().trim().min(2).max(32),
+  phone: z.string().trim().min(6).max(20),
+  password: z.string().min(10).max(200),
+});
+
+export const platformLoginSchema = z.object({
+  phone: z.string().trim().min(6).max(20),
   password: z.string().min(10).max(200),
 });
 
@@ -72,8 +78,8 @@ export type LoginInput = z.infer<typeof loginSchema>;
 
 export const ERROR_TEXT = {
   AUTH_INVALID_CREDENTIALS: {
-    ar: 'بيانات الدخول غير صحيحة',
-    en: 'The email, phone, or password is incorrect',
+    ar: 'رمز الصيدلية أو الجوال أو كلمة المرور غير صحيحة',
+    en: 'The pharmacy code, mobile number, or password is incorrect',
   },
   ACCOUNT_DISABLED: {
     ar: 'هذا الحساب موقوف. راجع مدير الصيدلية.',
@@ -123,6 +129,10 @@ export const ERROR_TEXT = {
     ar: 'تحقق من الحقول وأعد المحاولة.',
     en: 'Check the fields and try again.',
   },
+  DUPLICATE_PRODUCT: {
+    ar: 'هذا الصنف موجود في الدليل العالمي. اختره من البحث ولا تنشئ سجلاً آخر.',
+    en: 'This product is already in the global library. Select it from search instead of creating another record.',
+  },
   RATE_LIMITED: {
     ar: 'محاولات كثيرة. انتظر دقيقة ثم أعد المحاولة.',
     en: 'Too many attempts. Wait a minute and try again.',
@@ -150,6 +160,54 @@ export const ERROR_TEXT = {
   PICK_BRANCH: {
     ar: 'اختر فرعاً قبل تسجيل الحركة. عرض كل الفروع للقراءة فقط.',
     en: 'Choose one branch before recording a movement. All-branches is read only.',
+  },
+  NEED_PURCHASE: {
+    ar: 'اختر أمر الشراء قبل إدخال المخزون، أو سجّل رصيداً افتتاحياً بموافقة المالك.',
+    en: 'Choose a purchase order before receiving stock, or record an opening balance with owner approval.',
+  },
+  PRICE_DATE: {
+    ar: 'لا تسري قائمتان في نفس التاريخ. اجعل تاريخ القائمة بعد القائمة الحالية، أو انسخ القائمة الحالية باسم جديد ليصبح ذلك النسخ هو المستخدم في البيع.',
+    en: 'Two price lists cannot be active on the same date. Start the new list after the current one, or copy the current list with a new name so that copy is the one used in sales.',
+  },
+  NO_SELL_PRICE: {
+    ar: 'لا يوجد سعر بيع معتمد لهذا الدواء في قائمة الأسعار النشطة.',
+    en: 'This medicine has no selling price on the active price list.',
+  },
+  NEED_INVOICE: {
+    ar: 'أدخل رقم فاتورة المورد.',
+    en: 'Enter the supplier invoice number.',
+  },
+  NEED_BATCH: {
+    ar: 'تشغيلة المصنع اختيارية. إذا تُركت فارغة تُحفظ N/A.',
+    en: 'Manufacturer batch is optional. A blank value is saved as N/A.',
+  },
+  EXPIRED: {
+    ar: 'لا يدخل الدواء منتهي الصلاحية إلى المخزون القابل للبيع.',
+    en: 'An expired medicine cannot enter sellable inventory.',
+  },
+  OVER_RECEIVE: {
+    ar: 'الكمية المستلمة أكبر من المتبقي في أمر الشراء.',
+    en: 'The received quantity is higher than the quantity still open on the purchase order.',
+  },
+  OVER_POST: {
+    ar: 'الكمية أكبر من المتبقي لهذا الاستلام، أو تم إدخالها للمخزون من مستخدم آخر.',
+    en: 'That quantity is above what is still waiting to be stocked, or another user already posted it.',
+  },
+  NOT_ON_ORDER: {
+    ar: 'هذا الدواء غير موجود في أمر الشراء.',
+    en: 'That medicine is not on the purchase order.',
+  },
+  OPENING_FORBIDDEN: {
+    ar: 'الرصيد الافتتاحي وتجاوز الكمية يحتاج موافقة المالك.',
+    en: 'An opening balance or an over-receipt needs the owner.',
+  },
+  CONDITION_OPEN: {
+    ar: 'ما زال سبب التنبيه قائماً. عالج السبب ثم أغلق التنبيه.',
+    en: 'The alert condition is still true. Correct it, then resolve the alert.',
+  },
+  SNOOZE_BLOCKED: {
+    ar: 'لا يمكن تأجيل هذا التنبيه بهذه المدة.',
+    en: 'This alert cannot be snoozed for that long.',
   },
 } as const;
 

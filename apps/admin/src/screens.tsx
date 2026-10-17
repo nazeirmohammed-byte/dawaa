@@ -1,6 +1,7 @@
 import { cloneElement, FormEvent, isValidElement, useEffect, useState, type ReactElement, type ReactNode } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { ApiError, api, readFile } from './api';
+import { HelpTip } from './hint';
 import { tx, usePlatformLang, type PlatformLang } from './locale';
 
 type Row = Record<string, unknown>;
@@ -134,6 +135,8 @@ function actionLabel(lang: PlatformLang, value: string) {
     'tenant.suspend': ['إيقاف الصيدلية', 'Pharmacy suspended'],
     'tenant.reactivate': ['إعادة التفعيل', 'Pharmacy reactivated'],
     'tenant.trial': ['تمديد التجربة', 'Trial extended'],
+    'tenant.standard': ['تفعيل النسخة القياسية', 'Activated as standard'],
+    'tenant.trial_cancel': ['إلغاء التجربة', 'Trial cancelled'],
     'tenant.plan': ['تغيير الباقة', 'Plan changed'],
     'tenant.readonly': ['قفل للقراءة', 'Locked to read-only'],
     'tenant.writable': ['السماح بالكتابة', 'Writing allowed'],
@@ -211,7 +214,7 @@ export function SignupQueue() {
     <div className="stack" id="signups">
       <div className="page-head">
         <h2>{tx(lang, 'صيدليات تنتظر الموافقة', 'Pharmacies waiting for approval')}</h2>
-        <p>{tx(lang, 'كل من فتح حساباً من صفحة التسجيل. راجع البيانات ثم اعتمد الدخول أو ارفض الحساب.', 'Everyone who opened an account from the registration page. Review the details, then approve sign-in or reject the account.')}</p>
+        <p>{tx(lang, 'هذه حسابات فُتحت وما زال الدخول مغلقاً. الطلب الجديد يبدأ من «تسجيل طلب»، لا من هنا.', 'These accounts were opened and still cannot sign in. A new pharmacy starts from Enter a request, not from here.')}</p>
       </div>
       {error ? <p className="error">{error}</p> : null}
       {board.data.map((row) => {
@@ -269,7 +272,7 @@ export function DashboardPage() {
   const partners = (data.expiringPartners as Row[] | undefined) ?? [];
   const openRequests = (work.data ?? []).filter((row) => !['TENANT_CREATED', 'ACTIVE', 'REJECTED'].includes(String(row.status)));
   const jumps: { to: string; ar: string; en: string }[] = [
-    { to: '/admin/subscription-requests', ar: 'طلبات الاشتراك', en: 'Join requests' },
+    { to: '/admin/tenants?view=requests', ar: 'الصيدليات والطلبات', en: 'Pharmacies and requests' },
     { to: '/admin/pharmacy-accounts', ar: 'حسابات الدخول', en: 'Sign-in accounts' },
     { to: '/admin/catalog/library', ar: 'تنزيل الأدوية وتحديثها', en: 'Download and update medicines' },
     { to: '/admin/billing/invoices', ar: 'فواتير الاشتراك', en: 'Subscription invoices' },
@@ -278,20 +281,33 @@ export function DashboardPage() {
     <section>
       <div className="page-head">
         <h1>{tx(lang, 'عمل المالك', 'Owner work')}</h1>
-        <p>{tx(lang, 'من هنا تدير المنصة: تستلم طلب الصيدلية، تراجع الترخيص، تعتمد الحساب، ثم تحدّث دليل الأدوية.', 'Run the platform from here: receive a pharmacy request, check the license, approve the account, then update the medicine library.')}</p>
+        <p>{tx(lang, 'طلب من صفحة الدخول يفتح تجربة 14 يوماً فوراً. من سجل الصيدلية تُعتمد كنسخة قياسية أو تُلغى التجربة أو تُمدَّد.', 'A request from the sign-in page opens a 14-day trial at once. From the pharmacy record it becomes the standard edition, or the trial is cancelled or extended.')}</p>
       </div>
       <ol className="steps">
-        <li className="step on">{tx(lang, '١ استلام الطلب', '1 Receive the request')}</li>
-        <li className="step">{tx(lang, '٢ مراجعة الترخيصين', '2 Check both licenses')}</li>
+        <li className="step">{tx(lang, '١ طلب الاشتراك', '1 Subscription request')}</li>
+        <li className="step">{tx(lang, '٢ مراجعة الترخيص', '2 Check the license')}</li>
         <li className="step">{tx(lang, '٣ الاعتماد', '3 Approve')}</li>
         <li className="step">{tx(lang, '٤ إنشاء حساب الدخول', '4 Create the sign-in')}</li>
-        <li className="step">{tx(lang, '٥ تحديث دليل الأدوية', '5 Update the medicine library')}</li>
+        <li className="step">{tx(lang, '٥ تسليم الدخول وتدريب المالك', '5 Hand over the sign-in and train the owner')}</li>
       </ol>
       <div className="tools">
         {jumps.map((jump) => <Link key={jump.to} className="jump" to={jump.to}>{tx(lang, jump.ar, jump.en)}</Link>)}
-        <a className="jump" href="/subscribe">{tx(lang, 'تسجيل طلب صيدلية', 'Enter a pharmacy request')}</a>
+        <a className="jump" href="/subscribe?from=admin">{tx(lang, 'تسجيل طلب صيدلية', 'Enter a pharmacy request')}</a>
       </div>
       <SignupQueue />
+      <div className="panel">
+        <strong>{tx(lang, 'صحة المنصة', 'Platform health')}</strong>
+        <p>{tx(lang, 'أرقام مجمّعة من الاشتراكات والفواتير. تفاصيل أدوية الصيدليات لا تظهر هنا.', 'Counts from subscriptions and invoices. Pharmacy medicine details stay inside each pharmacy.')}</p>
+        <p>{tx(lang, 'موقوف', 'Suspended')}: {String((data.systemHealth as Row | undefined)?.suspended ?? data.suspendedTenants ?? 0)}</p>
+        <p>{tx(lang, 'قراءة فقط', 'Read only')}: {String((data.systemHealth as Row | undefined)?.readOnly ?? 0)}</p>
+        <p>{tx(lang, 'اشتراك يقارب الانتهاء', 'Subscription ending')}: {String((data.systemHealth as Row | undefined)?.expiringSubscriptions ?? 0)}</p>
+        <p>{tx(lang, 'دفع فاشل', 'Failed payment')}: {String((data.systemHealth as Row | undefined)?.failedPayments ?? 0)}</p>
+        <p>{tx(lang, 'فاتورة متأخرة', 'Overdue invoice')}: {String((data.systemHealth as Row | undefined)?.overdueInvoices ?? data.overdueInvoices ?? 0)}</p>
+        <div className="tools">
+          <Link to="/admin/tenants?status=SUSPENDED">{tx(lang, 'الصيدليات الموقوفة', 'Suspended pharmacies')}</Link>
+          <Link to="/admin/billing/invoices">{tx(lang, 'فواتير الاشتراك', 'Subscription invoices')}</Link>
+        </div>
+      </div>
       <div className="cards">
         {cards.map((card) => (
           <article key={card.id} className="card">
@@ -324,68 +340,38 @@ export function DashboardPage() {
   );
 }
 
-const blankPharmacy = {
-  tradeNameAr: '',
-  tradeNameEn: '',
-  displayName: '',
-  email: '',
-  phone: '',
-  password: '',
-  branchCount: '1',
-  management: 'INDEPENDENT',
-  branchNameAr: 'الفرع الرئيسي',
-};
-
 export function TenantsPage() {
   const { lang } = usePlatformLang();
+  const [params, setParams] = useSearchParams();
+  const view = params.get('view') === 'requests' ? 'requests' : 'pharmacies';
   const [q, setQ] = useState('');
   const [status, setStatus] = useState('');
   const [query, setQuery] = useState('');
-  const [creating, setCreating] = useState(false);
-  const [error, setError] = useState('');
-  const [fields, setFields] = useState<Record<string, string>>({});
-  const [made, setMade] = useState<{ tenantId: string; email: string } | null>(null);
-  const [form, setForm] = useState(blankPharmacy);
   const board = useLoad<{ rows: Row[]; total: number }>(`/api/v1/platform/tenants?q=${encodeURIComponent(query)}&status=${status}`);
-  if (board.loading) return <p>{tx(lang, 'جار التحميل…', 'Loading…')}</p>;
-  if (board.error || !board.data) return <p className="error">{board.error || tx(lang, 'لا توجد بيانات', 'No data')}</p>;
-  const rows = board.data.rows;
+  const rows = board.data?.rows ?? [];
   const headers = lang === 'ar'
-    ? ['الصيدلية', 'النوع', 'المالك', 'الهاتف', 'البريد', 'الباقة', 'الحساب', 'التحقق', 'الفروع', 'المستخدمون', 'الأجهزة', 'آخر دخول', 'تاريخ الإنشاء', 'فتح']
-    : ['Pharmacy', 'Type', 'Owner', 'Phone', 'Email', 'Plan', 'Account', 'Check', 'Branches', 'Users', 'Devices', 'Last sign-in', 'Created', 'Open'];
-  function setField<K extends keyof typeof form>(key: K, value: (typeof form)[K]) {
-    setForm((current) => ({ ...current, [key]: value }));
-    setFields((current) => {
-      if (!current[key]) return current;
-      const next = { ...current };
-      delete next[key];
-      return next;
-    });
-  }
-  function pharmacyProblems(): Record<string, string> {
-    const bag: Record<string, string> = {};
-    const need = (key: string, value: string, label: string) => {
-      if (value.trim().length < 2) bag[key] = fieldNote(lang, key, 'required', label);
-    };
-    need('tradeNameAr', form.tradeNameAr, tx(lang, 'الاسم بالعربية', 'Arabic name'));
-    need('tradeNameEn', form.tradeNameEn, tx(lang, 'الاسم بالإنجليزية', 'English name'));
-    need('displayName', form.displayName, tx(lang, 'اسم المالك', 'Owner name'));
-    if (!form.email.trim()) bag.email = fieldNote(lang, 'email', 'required', tx(lang, 'البريد', 'Email'));
-    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim())) bag.email = fieldNote(lang, 'email', 'email', '');
-    if (form.password.length < 10) {
-      bag.password = fieldNote(lang, 'password', form.password ? 'short' : 'required', tx(lang, 'كلمة المرور', 'Password'));
-    }
-    const count = Number(form.branchCount);
-    if (!Number.isInteger(count) || count < 1 || count > 20) bag.branchCount = fieldNote(lang, 'branchCount', 'range', '');
-    need('branchNameAr', form.branchNameAr, tx(lang, 'الفرع', 'Branch'));
-    return bag;
-  }
+    ? ['الصيدلية', 'رمز الدخول', 'النوع', 'المالك', 'الهاتف', 'البريد', 'الباقة', 'الحساب', 'التحقق', 'الفروع', 'المستخدمون', 'الأجهزة', 'آخر دخول', 'تاريخ الإنشاء', 'فتح']
+    : ['Pharmacy', 'Code', 'Type', 'Owner', 'Phone', 'Email', 'Plan', 'Account', 'Check', 'Branches', 'Users', 'Devices', 'Last sign-in', 'Created', 'Open'];
   return (
     <section>
       <div className="page-head">
         <h1>{tx(lang, 'الصيدليات', 'Pharmacies')}</h1>
-        <p>{tx(lang, 'كل صيدلية على المنصة. افتحها لإدارة الاشتراك والحسابات والإعداد.', 'Every pharmacy on the platform. Open one to manage its subscription, accounts, and setup.')}</p>
+        <p>{tx(lang, 'طلب صفحة الدخول يفتح تجربة 14 يوماً. الطلب الذي تدخله أنت يبقى للمراجعة.', 'A request from the sign-in page opens a 14-day trial. A request you enter here stays for review.')}</p>
       </div>
+      <ol className="steps">
+        <li className={view === 'requests' ? 'step on' : 'step'}>{tx(lang, '١ طلب الاشتراك', '1 Subscription request')}</li>
+        <li className="step">{tx(lang, '٢ مراجعة الترخيص', '2 Check the license')}</li>
+        <li className="step">{tx(lang, '٣ الاعتماد', '3 Approve')}</li>
+        <li className="step">{tx(lang, '٤ إنشاء حساب الدخول', '4 Create the sign-in')}</li>
+        <li className={view === 'pharmacies' ? 'step on' : 'step'}>{tx(lang, '٥ تسليم الدخول وتدريب المالك', '5 Hand over the sign-in and train the owner')}</li>
+      </ol>
+      <div className="tools">
+        <button type="button" className={view === 'requests' ? 'primary' : 'ghost'} onClick={() => setParams({ view: 'requests' })}>{tx(lang, 'الطلبات', 'Requests')}</button>
+        <button type="button" className={view === 'pharmacies' ? 'primary' : 'ghost'} onClick={() => setParams({})}>{tx(lang, 'الصيدليات', 'Pharmacies')}</button>
+        <a className="jump" href="/subscribe?from=admin">{tx(lang, 'تسجيل طلب جديد', 'Enter a new request')}</a>
+      </div>
+      {view === 'requests' ? <RequestsPage embedded /> : null}
+      {view === 'requests' ? null : (<>
       <form className="tools" onSubmit={(event) => { event.preventDefault(); setQuery(q); }}>
         <input value={q} onChange={(event) => setQ(event.target.value)} placeholder={tx(lang, 'اسم أو بريد', 'Name or email')} />
         <select value={status} onChange={(event) => setStatus(event.target.value)}>
@@ -395,82 +381,8 @@ export function TenantsPage() {
           <option value="SUSPENDED">{statusLabel(lang, 'SUSPENDED')}</option>
         </select>
         <button type="submit">{tx(lang, 'بحث', 'Search')}</button>
-        <button type="button" className={creating ? 'ghost' : ''} onClick={() => { setCreating((open) => !open); setError(''); setFields({}); }}>
-          {creating ? tx(lang, 'إغلاق', 'Close') : tx(lang, 'فتح حساب صيدلية', 'Open a pharmacy account')}
-        </button>
       </form>
-      {made ? (
-        <p className="panel secret">
-          {tx(lang, 'تم فتح الحساب. الدخول بالبريد وكلمة المرور التي كتبتها.', 'The account is open. Sign in with the email and the password you entered.')}
-          {' '}<Ltr value={made.email} />
-          {' '}<Link to={`/admin/tenants/${made.tenantId}`}>{tx(lang, 'إدارة', 'Manage')}</Link>
-        </p>
-      ) : null}
-      {creating ? (
-        <form className="panel" noValidate onSubmit={(event) => {
-          event.preventDefault();
-          const local = pharmacyProblems();
-          if (Object.keys(local).length) {
-            setError('');
-            setFields(local);
-            const first = Object.keys(local)[0];
-            if (first) focusField(first);
-            return;
-          }
-          setError('');
-          setFields({});
-          void api<{ tenantId: string; email: string }>('/api/v1/platform/tenants', {
-            method: 'POST',
-            body: JSON.stringify({ ...form, branchCount: Number(form.branchCount), branchNameEn: 'Main branch' }),
-          }).then((result) => {
-            setMade(result);
-            setForm(blankPharmacy);
-            setCreating(false);
-            board.reload();
-          }).catch((caught: unknown) => {
-            if (caught instanceof ApiError && Object.keys(caught.fields).length) {
-              const labels: Record<string, string> = {
-                tradeNameAr: tx(lang, 'الاسم بالعربية', 'Arabic name'),
-                tradeNameEn: tx(lang, 'الاسم بالإنجليزية', 'English name'),
-                displayName: tx(lang, 'اسم المالك', 'Owner name'),
-                email: tx(lang, 'البريد', 'Email'),
-                phone: tx(lang, 'الهاتف', 'Phone'),
-                password: tx(lang, 'كلمة المرور', 'Password'),
-                branchNameAr: tx(lang, 'الفرع', 'Branch'),
-              };
-              const bag: Record<string, string> = {};
-              for (const [key, code] of Object.entries(caught.fields)) bag[key] = fieldNote(lang, key, code, labels[key] ?? key);
-              setFields(bag);
-              const first = Object.keys(bag)[0];
-              if (first) focusField(first);
-              return;
-            }
-            setError(caught instanceof Error ? caught.message : tx(lang, 'تعذر إنشاء الحساب', 'Could not create the account'));
-          });
-        }}>
-          <h2>{tx(lang, 'فتح حساب صيدلية', 'Open a pharmacy account')}</h2>
-          <p className="hint">{tx(lang, 'نفس خطوات التسجيل من الصفحة الأولى: الاسم، المالك، الدخول، وعدد الفروع.', 'The same steps as registration on the welcome page: name, owner, sign-in, and branch count.')}</p>
-          {error ? <p className="error">{error}</p> : null}
-          <div className="grid">
-            <Flagged name="tradeNameAr" label={tx(lang, 'الاسم بالعربية', 'Arabic name')} message={fields.tradeNameAr}><input value={form.tradeNameAr} onChange={(event) => setField('tradeNameAr', event.target.value)} /></Flagged>
-            <Flagged name="tradeNameEn" label={tx(lang, 'الاسم بالإنجليزية', 'English name')} message={fields.tradeNameEn}><input value={form.tradeNameEn} onChange={(event) => setField('tradeNameEn', event.target.value)} /></Flagged>
-            <Flagged name="displayName" label={tx(lang, 'اسم المالك', 'Owner name')} message={fields.displayName}><input value={form.displayName} onChange={(event) => setField('displayName', event.target.value)} /></Flagged>
-            <Flagged name="email" label={tx(lang, 'البريد', 'Email')} message={fields.email}><input type="email" dir="ltr" value={form.email} onChange={(event) => setField('email', event.target.value)} /></Flagged>
-            <Flagged name="phone" label={tx(lang, 'الهاتف', 'Phone')} message={fields.phone}><input dir="ltr" value={form.phone} onChange={(event) => setField('phone', event.target.value)} /></Flagged>
-            <Flagged name="password" label={tx(lang, 'كلمة المرور', 'Password')} message={fields.password}><input type="password" value={form.password} onChange={(event) => setField('password', event.target.value)} /></Flagged>
-            <Flagged name="branchCount" label={tx(lang, 'عدد الفروع في الاشتراك', 'Branches in the subscription')} message={fields.branchCount}><input type="number" min={1} max={20} value={form.branchCount} onChange={(event) => setField('branchCount', event.target.value)} /></Flagged>
-            <Flagged name="management" label={tx(lang, 'إدارة الفروع', 'Branch management')} message={fields.management}>
-              <select value={form.management} onChange={(event) => setField('management', event.target.value)}>
-                <option value="INDEPENDENT">{tx(lang, 'مستقلة: مخزون وتقرير لكل فرع', 'Independent: stock and a report for each branch')}</option>
-                <option value="SHARED">{tx(lang, 'مشتركة: تقرير الصيدلية يجمع الفروع', 'Shared: the pharmacy report combines branches')}</option>
-              </select>
-            </Flagged>
-          </div>
-          <Flagged name="branchNameAr" label={tx(lang, 'الفرع', 'Branch')} message={fields.branchNameAr}><input value={form.branchNameAr} onChange={(event) => setField('branchNameAr', event.target.value)} /></Flagged>
-          <button type="submit">{tx(lang, 'فتح حساب صيدلية', 'Open a pharmacy account')}</button>
-        </form>
-      ) : null}
-      {rows.length === 0 ? <p>{tx(lang, 'لا توجد صيدليات.', 'No pharmacies.')}</p> : (
+      {board.loading ? <p>{tx(lang, 'جار التحميل…', 'Loading…')}</p> : board.error ? <p className="error">{board.error}</p> : rows.length === 0 ? <p>{tx(lang, 'لا توجد صيدليات.', 'No pharmacies.')}</p> : (
         <table>
           <thead>
             <tr>{headers.map((cell) => <th key={cell || 'open'}>{cell}</th>)}</tr>
@@ -486,6 +398,7 @@ export function TenantsPage() {
               return (
                 <tr key={String(row.id)} className={tone ? `tone-${tone}` : undefined}>
                   <td>{lang === 'ar' ? String(row.tradeNameAr) : String(row.tradeNameEn || row.tradeNameAr)}</td>
+                  <td><Ltr value={String(row.accountCode ?? '')} /></td>
                   <td><span className={`chip ${kind}`}>{statusLabel(lang, String(row.type))}</span></td>
                   <td>{String(row.ownerName)}</td>
                   <td><Ltr value={String(row.phone ?? '')} /></td>
@@ -509,6 +422,7 @@ export function TenantsPage() {
           </tbody>
         </table>
       )}
+      </>)}
     </section>
   );
 }
@@ -586,14 +500,20 @@ export function TenantPage() {
           <article className="panel">
             <h2>{tx(lang, 'بيانات الصيدلية', 'Pharmacy record')}</h2>
             <dl className="facts">
+              <Fact label={tx(lang, 'رمز الدخول', 'Sign-in code')}><Ltr value={String(data.accountCode ?? '')} /></Fact>
               <Fact label={tx(lang, 'النوع', 'Type')}>{statusLabel(lang, String(data.type))}</Fact>
               <Fact label={tx(lang, 'المالك', 'Owner')}>{String(data.ownerName)}</Fact>
               <Fact label={tx(lang, 'الهاتف', 'Phone')}><Ltr value={String(data.phone ?? '')} /></Fact>
               <Fact wide label={tx(lang, 'البريد', 'Email')}><Ltr value={String(data.email ?? '')} /></Fact>
               <Fact wide label={tx(lang, 'العنوان', 'Address')}>{String(data.addressLine || '—')}</Fact>
-              <Fact label={tx(lang, 'ترخيص الصيدلية', 'Pharmacy license')}><Ltr value={String(data.licenseNumber ?? '')} /></Fact>
               <Fact label={tx(lang, 'الصيدلي', 'Pharmacist')}>{String(data.pharmacistName || '—')}</Fact>
-              <Fact label={tx(lang, 'ترخيص الصيدلي', 'Pharmacist license')}><Ltr value={String(data.pharmacistLicense ?? '')} /></Fact>
+              {String(data.status) === 'TRIAL' ? <Fact wide label={tx(lang, 'النسخة', 'Edition')}>{tx(lang, 'تجريبية حتى', 'Trial until')} {day(lang, data.trialEndsAt)}</Fact> : null}
+              {documents.length > 0 ? null : (
+                <>
+                  <Fact label={tx(lang, 'ترخيص الصيدلية', 'Pharmacy license')}><Ltr value={String(data.licenseNumber ?? '')} /></Fact>
+                  <Fact label={tx(lang, 'ترخيص الصيدلي', 'Pharmacist license')}><Ltr value={String(data.pharmacistLicense ?? '')} /></Fact>
+                </>
+              )}
             </dl>
             <h3>{tx(lang, 'الوحدات', 'Modules')}</h3>
             {flags.length === 0 ? <p className="hint">{tx(lang, 'لا توجد وحدات.', 'No modules.')}</p> : (
@@ -639,7 +559,11 @@ export function TenantPage() {
                 <div className="quiet-list">
                   {documents.map((doc) => (
                     <p key={String(doc.id)}>
-                      <span>{statusLabel(lang, String(doc.kind))}</span>
+                      <span>
+                        {statusLabel(lang, String(doc.kind))}
+                        {doc.licenseNumber ? <> — <Ltr value={String(doc.licenseNumber)} /></> : null}
+                        {doc.expiresOn ? <> · {day(lang, doc.expiresOn)}</> : null}
+                      </span>
                       <span>
                         <Badge value={String(doc.status)} label={statusLabel(lang, String(doc.status))} />
                         {doc.hasFile ? <> <a href={`/api/v1/platform/documents/${String(doc.id)}`}>{tx(lang, 'عرض', 'View')}</a></> : null}
@@ -677,9 +601,16 @@ export function TenantPage() {
             </article>
             <article className="panel">
               <h2>{tx(lang, 'التجربة', 'Trial')}</h2>
-              <p className="hint">{tx(lang, 'تنتهي في', 'Ends')} {day(lang, data.trialEndsAt)}</p>
+              <p className="hint">
+                {String(data.status) === 'TRIAL'
+                  ? tx(lang, 'هذه نسخة تجريبية لـ 14 يوماً عند التسجيل. يمكن تفعيلها كنسخة قياسية، أو إلغاء التجربة، أو إضافة أيام.', 'A new registration starts as a 14-day trial. Activate it as the standard edition, cancel the trial, or add extra days.')
+                  : tx(lang, 'يمكن إعادة التجربة بأيام إضافية، أو تفعيل النسخة القياسية.', 'Add extra trial days, or activate the standard edition.')}
+                {' '}{tx(lang, 'تنتهي في', 'Ends')} {day(lang, data.trialEndsAt)}
+              </p>
               <div className="tools">
-                <label className="field fit">{tx(lang, 'أيام التجربة', 'Trial days')}<input value={days} onChange={(event) => setDays(event.target.value.replace(/\D/g, '').slice(0, 2))} /></label>
+                <button type="button" disabled={String(data.status) === 'ACTIVE'} onClick={() => act(`/api/v1/platform/tenants/${id}/standard`, { reason: note })}>{tx(lang, 'تفعيل النسخة القياسية', 'Activate as standard')}</button>
+                <button type="button" className="danger" disabled={String(data.status) !== 'TRIAL'} onClick={() => act(`/api/v1/platform/tenants/${id}/trial-cancel`, { reason: note })}>{tx(lang, 'إلغاء التجربة', 'Cancel trial')}</button>
+                <label className="field fit">{tx(lang, 'أيام إضافية', 'Extra days')}<input value={days} onChange={(event) => setDays(event.target.value.replace(/\D/g, '').slice(0, 2))} /></label>
                 <button type="button" onClick={() => act(`/api/v1/platform/tenants/${id}/trial`, { days: Math.min(90, Math.max(1, Number(days) || 14)), reason: note })}>{tx(lang, 'تمديد التجربة', 'Extend trial')}</button>
               </div>
             </article>
@@ -711,8 +642,8 @@ export function TenantPage() {
             event.preventDefault();
             const bag: Record<string, string> = {};
             if (admin.displayName.trim().length < 2) bag.displayName = fieldNote(lang, 'displayName', 'required', tx(lang, 'الاسم', 'Name'));
-            if (!admin.email.trim()) bag.email = fieldNote(lang, 'email', 'required', tx(lang, 'البريد', 'Email'));
-            else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(admin.email.trim())) bag.email = fieldNote(lang, 'email', 'email', '');
+            if (admin.phone.trim().length < 6) bag.phone = fieldNote(lang, 'phone', 'required', tx(lang, 'اسم المستخدم (الجوال)', 'Username (mobile)'));
+            if (admin.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(admin.email.trim())) bag.email = fieldNote(lang, 'email', 'email', '');
             const chosen = admin.branchId || String(branches[0]?.id ?? '');
             if (!chosen) bag.branchId = fieldNote(lang, 'branchId', 'required', tx(lang, 'الفرع', 'Branch'));
             if (Object.keys(bag).length) {
@@ -727,7 +658,7 @@ export function TenantPage() {
               method: 'POST',
               body: JSON.stringify({ displayName: admin.displayName, email: admin.email, phone: admin.phone, branchId: chosen }),
             }).then((result) => {
-              if (result.password) setSecret(String(result.password));
+              if (result.password) setSecret(`${String(result.phone || admin.phone)} / ${String(result.password)}`);
               setAdmin({ displayName: '', email: '', phone: '', branchId: '' });
               board.reload();
             }).catch((caught: unknown) => {
@@ -747,8 +678,8 @@ export function TenantPage() {
             <h2>{tx(lang, 'إضافة حساب مالك', 'Add an owner account')}</h2>
             <div className="grid">
               <Flagged name="displayName" label={tx(lang, 'الاسم', 'Name')} message={accountFields.displayName}><input value={admin.displayName} onChange={(event) => { setAdmin({ ...admin, displayName: event.target.value }); setAccountFields((current) => ({ ...current, displayName: '' })); }} /></Flagged>
-              <Flagged name="email" label={tx(lang, 'البريد', 'Email')} message={accountFields.email}><input type="email" dir="ltr" value={admin.email} onChange={(event) => { setAdmin({ ...admin, email: event.target.value }); setAccountFields((current) => ({ ...current, email: '' })); }} /></Flagged>
-              <Flagged name="phone" label={tx(lang, 'الهاتف', 'Phone')} message={accountFields.phone}><input dir="ltr" value={admin.phone} onChange={(event) => { setAdmin({ ...admin, phone: event.target.value }); setAccountFields((current) => ({ ...current, phone: '' })); }} /></Flagged>
+              <Flagged name="phone" label={tx(lang, 'اسم المستخدم (الجوال)', 'Username (mobile)')} message={accountFields.phone}><input dir="ltr" value={admin.phone} onChange={(event) => { setAdmin({ ...admin, phone: event.target.value }); setAccountFields((current) => ({ ...current, phone: '' })); }} required minLength={6} /></Flagged>
+              <Flagged name="email" label={tx(lang, 'البريد (اختياري)', 'Email (optional)')} message={accountFields.email}><input type="email" dir="ltr" value={admin.email} onChange={(event) => { setAdmin({ ...admin, email: event.target.value }); setAccountFields((current) => ({ ...current, email: '' })); }} /></Flagged>
               <Flagged name="branchId" label={tx(lang, 'الفرع', 'Branch')} message={accountFields.branchId}>
                 <select value={admin.branchId || String(branches[0]?.id ?? '')} onChange={(event) => setAdmin({ ...admin, branchId: event.target.value })}>
                   {branches.map((row) => <option key={String(row.id)} value={String(row.id)}>{lang === 'ar' ? String(row.nameAr) : String(row.nameEn || row.nameAr)}</option>)}
@@ -759,6 +690,7 @@ export function TenantPage() {
           </form>
           <article className="panel">
             <h2>{tx(lang, 'حسابات الدخول', 'Sign-in accounts')}</h2>
+            <p className="hint">{tx(lang, 'اسم المستخدم هو رقم الجوال، لا البريد. اكتب رقم الدخول ثم اضغط «تعيين رقم الدخول» على الشخص المقصود. كلمة المرور الجديدة ورمز المرة الواحدة يظهران مرة واحدة أعلى الصفحة.', 'The username is the mobile number, not the email. Type the sign-in code, then press Set sign-in code on that person. A new password and a one-time code appear once at the top of the page.')}</p>
             <label className="field fit">{tx(lang, 'رقم الدخول الجديد', 'New sign-in code')}<input dir="ltr" value={pin} placeholder="1234" onChange={(event) => setPin(event.target.value.replace(/\D/g, '').slice(0, 6))} /></label>
             {users.length === 0 ? <p className="hint">{tx(lang, 'لا يوجد مستخدمون.', 'No users.')}</p> : (
               <div className="stack">
@@ -770,7 +702,7 @@ export function TenantPage() {
                         <strong>{String(user.displayName)}</strong>
                         <p className="hint">
                           {tx(lang, role[0], role[1])}
-                          {' · '}<Ltr value={String(user.email ?? '')} />
+                          {' · '}<Ltr value={String(user.phone || '—')} />
                           {' · '}{user.isActive === false ? tx(lang, 'موقوف', 'Disabled') : tx(lang, 'يعمل', 'Active')}
                         </p>
                         <p className="hint">
@@ -815,7 +747,7 @@ export function TenantPage() {
   );
 }
 
-export function RequestsPage() {
+export function RequestsPage({ embedded = false }: { embedded?: boolean }) {
   const { lang } = usePlatformLang();
   const [status, setStatus] = useState('');
   const board = useLoad<Row[]>(`/api/v1/platform/requests${status ? `?status=${status}` : ''}`);
@@ -832,15 +764,17 @@ export function RequestsPage() {
   ];
   return (
     <section>
-      <div className="page-head">
-        <h1>{tx(lang, 'طلبات الاشتراك', 'Join requests')}</h1>
-        <p>{tx(lang, 'الصيدلية ترسل الطلب، وأنت تراجعه ثم تنشئ حساب الدخول. الترتيب ثابت: استلام، مراجعة الترخيص، اعتماد، إنشاء الحساب.', 'A pharmacy sends the request. You review it, then create the sign-in. The order is fixed: receive, check the license, approve, create the account.')}</p>
-      </div>
+      {embedded ? null : (
+        <div className="page-head">
+          <h1>{tx(lang, 'طلبات الاشتراك', 'Join requests')}</h1>
+          <p>{tx(lang, 'الصيدلية ترسل الطلب، وأنت تراجعه ثم تنشئ حساب الدخول. الترتيب ثابت: استلام، مراجعة الترخيص، اعتماد، إنشاء الحساب.', 'A pharmacy sends the request. You review it, then create the sign-in. The order is fixed: receive, check the license, approve, create the account.')}</p>
+        </div>
+      )}
       <div className="tools">
         {filters.map(([code, ar, en, tone]) => (
           <button key={code || 'all'} type="button" className={status === code ? `pick ${tone}` : 'ghost'} onClick={() => setStatus(code)}>{tx(lang, ar, en)}</button>
         ))}
-        <a className="jump" href="/subscribe">{tx(lang, 'تسجيل طلب جديد', 'Enter a new request')}</a>
+        {embedded ? null : <a className="jump" href="/subscribe?from=admin">{tx(lang, 'تسجيل طلب جديد', 'Enter a new request')}</a>}
       </div>
       {rows.length === 0 ? <p>{tx(lang, 'لا توجد طلبات في هذا التصفية.', 'No requests in this filter.')}</p> : (
         <table>
@@ -947,26 +881,40 @@ export function RequestDetailPage() {
   const { id = '' } = useParams();
   const board = useLoad<Row>(`/api/v1/platform/requests/${id}`);
   const [reason, setReason] = useState('تمت مراجعة الترخيص');
-  const [expiresOn, setExpiresOn] = useState('2027-12-31');
   const [error, setError] = useState('');
   const [secret, setSecret] = useState('');
+  const [phone, setPhone] = useState('');
+  const [email, setEmail] = useState('');
+  const [accountCode, setAccountCode] = useState('');
+  const [taken, setTaken] = useState('');
+  const contactKey = board.data ? `${String(board.data.id)}|${String(board.data.ownerPhone ?? '')}|${String(board.data.ownerEmail ?? '')}|${String(board.data.nextAccountCode ?? '')}` : '';
+  useEffect(() => {
+    const parts = contactKey.split('|');
+    if (parts.length < 4 || !parts[0]) return;
+    setPhone(parts[1] ?? '');
+    setEmail(parts[2] ?? '');
+    setAccountCode(parts[3] ?? '');
+    setTaken('');
+  }, [contactKey]);
   if (board.loading) return <p>{tx(lang, 'جار التحميل…', 'Loading…')}</p>;
   if (board.error || !board.data) return <p className="error">{board.error || tx(lang, 'غير موجود', 'Not found')}</p>;
   const data = board.data;
   const status = String(data.status);
   const docs = (data.documents as Row[]) ?? [];
+  const pharmacistDoc = docs.some((doc) => doc.kind === 'PHARMACIST_LICENSE');
   const docsReady = docs.some((doc) => doc.kind === 'PHARMACY_LICENSE' && doc.status === 'VALID')
-    && docs.some((doc) => doc.kind === 'PHARMACIST_LICENSE' && doc.status === 'VALID');
+    && (!pharmacistDoc || docs.some((doc) => doc.kind === 'PHARMACIST_LICENSE' && doc.status === 'VALID'));
   const stepIndex = REQUEST_FLOW.indexOf(status as (typeof REQUEST_FLOW)[number]);
   async function act(path: string, body: Row) {
     await run(async () => {
       const result = await api<Row>(path, { method: 'POST', body: JSON.stringify(body) });
-      if (result.password) setSecret(`${String(result.email ?? '')} / ${String(result.password)}`);
+      if (result.password) setSecret(`${String(result.phone || result.email || '')} / ${String(result.password)}`);
     }, board.reload, setError);
   }
   return (
     <section>
       <div className="page-head">
+        <p className="crumb"><Link to="/admin/tenants?view=requests">{tx(lang, 'الصيدليات', 'Pharmacies')}</Link></p>
         <h1>{String(data.tradeNameAr)}</h1>
         <p>{String(data.ownerName)} — {String(data.ownerPhone)} — {String(data.ownerEmail ?? '')}</p>
       </div>
@@ -976,46 +924,117 @@ export function RequestDetailPage() {
         ))}
       </ol>
       <p><Badge value={status} label={statusLabel(lang, status)} /></p>
-      <p>{tx(lang, 'الصيدلي المسؤول', 'Responsible pharmacist')}: {String(data.pharmacistName)} / {String(data.pharmacistLicense)}</p>
+      <p>{tx(lang, 'الصيدلي المسؤول', 'Responsible pharmacist')}: {String(data.pharmacistName)}</p>
       <p>
-        {tx(lang, 'ترخيص الصيدلية', 'Pharmacy license')}: {String(data.pharmacyLicense)} — {tx(lang, 'الباقة', 'Plan')} {String(data.planCode)}
+        {tx(lang, 'الباقة', 'Plan')} {String(data.planCode)}
         {' — '}{tx(lang, cycleWords(String(data.billingCycle || 'MONTHLY')).ar, cycleWords(String(data.billingCycle || 'MONTHLY')).en)}
         {data.quotedAmount ? <span dir="ltr"> {showMoney(String(data.quotedAmount))}</span> : null}
       </p>
       {error ? <p className="error">{error}</p> : null}
       {secret ? (
-        <p className="panel">
-          {tx(lang, 'حساب الدخول يظهر مرة واحدة. سجّله الآن ثم سلّمه للمالك.', 'The sign-in is shown once. Copy it now and give it to the owner.')}
-          <strong> {secret}</strong>
-        </p>
+        <div className="panel secret">
+          <p>
+            {tx(lang, 'حساب الدخول يظهر مرة واحدة. سجّله الآن ثم سلّمه للمالك. الترتيب: رمز الصيدلية، ثم الجوال، ثم كلمة المرور.', 'The sign-in is shown once. Copy it now and give it to the owner. The order is pharmacy code, then mobile, then password.')}
+            <strong> {secret}</strong>
+          </p>
+          <ol className="steps">
+            <li className="step on">{tx(lang, '١ ادخل معه من شاشة الصيدلية', '1 Sign in with him on the pharmacy screen')}</li>
+            <li className="step">{tx(lang, '٢ الإعدادات: اسم الإيصال وعرض الورق', '2 Settings: receipt name and paper width')}</li>
+            <li className="step">{tx(lang, '٣ مستخدم للكاشير بجواله', '3 A cashier user, with that person’s mobile')}</li>
+            <li className="step">{tx(lang, '٤ أسعار البيع ثم استلام أول بضاعة', '4 Selling prices, then receive the first goods')}</li>
+            <li className="step">{tx(lang, '٥ بيع تجريبي ثم تقرير اليوم', '5 A practice sale, then today’s report')}</li>
+          </ol>
+        </div>
       ) : null}
       <label className="field">{tx(lang, 'ملاحظة الإجراء', 'Note for this step')}<textarea value={reason} onChange={(event) => setReason(event.target.value)} /></label>
+      {status === 'APPROVED' ? (
+        <div className="subscribe-grid">
+          <label className={taken === 'phone' ? 'field bad wide' : 'field wide'}>
+            {tx(lang, 'هاتف المالك', 'Owner phone')}
+            <input dir="ltr" value={phone} autoComplete="tel" onChange={(event) => { setPhone(event.target.value); setTaken(''); }} />
+            {taken === 'phone' ? <small className="field-error">{tx(lang, 'هذا الهاتف مستخدم. اختر رقماً آخر ثم حدّث.', 'This phone is already used. Choose another, then update.')}</small> : null}
+          </label>
+          <label className={taken === 'email' ? 'field bad wide' : 'field wide'}>
+            {tx(lang, 'بريد المالك', 'Owner email')}
+            <input type="email" dir="ltr" value={email} autoComplete="email" onChange={(event) => { setEmail(event.target.value); setTaken(''); }} />
+            {taken === 'email' ? <small className="field-error">{tx(lang, 'هذا البريد مستخدم. اختر بريداً آخر ثم حدّث.', 'This email is already used. Choose another, then update.')}</small> : null}
+          </label>
+          <label className={taken === 'code' ? 'field bad wide' : 'field wide'}>
+            {tx(lang, 'رمز الصيدلية', 'Pharmacy code')}
+            <input
+              dir="ltr"
+              value={accountCode}
+              autoComplete="off"
+              onChange={(event) => {
+                setAccountCode(event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 16));
+                setTaken('');
+              }}
+            />
+            <small className={taken === 'code' ? 'field-error' : 'hint'}>
+              {taken === 'code'
+                ? tx(lang, 'هذا الرمز مستخدم أو غير صالح. اختر رمزاً من 4 إلى 16 حرفاً أو رقماً يبدأ بحرف.', 'That code is used or not valid. Use 4 to 16 letters or digits, starting with a letter.')
+                : tx(lang, 'الرمز التالي معبّأ. غيّره قبل إنشاء الحساب إن أردت رمزاً آخر.', 'The next code is filled in. Change it before creating the account if you want another.')}
+            </small>
+          </label>
+        </div>
+      ) : null}
       <div className="tools">
         {status === 'SUBMITTED' || status === 'NEED_MORE_INFO' ? (
           <button type="button" onClick={() => act(`/api/v1/platform/requests/${id}/status`, { status: 'UNDER_REVIEW', reason })}>{tx(lang, 'بدء المراجعة', 'Start review')}</button>
         ) : null}
         {status === 'UNDER_REVIEW' ? (
           <button type="button" disabled={!docsReady} onClick={() => act(`/api/v1/platform/requests/${id}/status`, { status: 'VERIFIED', reason })}>
-            {docsReady ? tx(lang, 'الترخيصان ساريان، إتمام التحقق', 'Both licenses are valid, finish verification') : tx(lang, 'علّم الترخيصين ساريين أولاً', 'Mark both licenses valid first')}
+            {docsReady ? tx(lang, 'الترخيص ساري، إتمام التحقق', 'The license is valid, finish verification') : tx(lang, 'علّم الترخيص سارياً أولاً', 'Mark the license valid first')}
           </button>
         ) : null}
         {status === 'VERIFIED' ? (
           <button type="button" onClick={() => act(`/api/v1/platform/requests/${id}/status`, { status: 'APPROVED', reason })}>{tx(lang, 'اعتماد الطلب', 'Approve the request')}</button>
         ) : null}
         {status === 'APPROVED' ? (
-          <button type="button" onClick={() => {
-            void run(async () => {
-              try {
-                const result = await api<Row>(`/api/v1/platform/requests/${id}/create-tenant`, { method: 'POST', body: JSON.stringify({ overrideReason: reason }) });
-                if (result.password) setSecret(`${String(result.email ?? '')} / ${String(result.password)}`);
-              } catch (caught) {
-                if (caught instanceof ApiError && caught.code === 'VALIDATION_ERROR') {
-                  throw new Error(tx(lang, 'البريد أو الهاتف مستخدم في صيدلية أخرى. غيّرهما في الطلب.', 'That email or phone is already used by another pharmacy.'));
+          <>
+            <button type="button" className="ghost" onClick={() => {
+              void run(
+                () => api(`/api/v1/platform/requests/${id}/contact`, { method: 'POST', body: JSON.stringify({ ownerPhone: phone.trim(), ownerEmail: email.trim() }) }),
+                board.reload,
+                setError,
+              );
+            }}>{tx(lang, 'تحديث', 'Update')}</button>
+            <button type="button" onClick={() => {
+              void (async () => {
+                setError('');
+                try {
+                  const nextPhone = phone.trim();
+                  const nextEmail = email.trim();
+                  if (nextPhone !== String(data.ownerPhone ?? '') || nextEmail !== String(data.ownerEmail ?? '')) {
+                    await api(`/api/v1/platform/requests/${id}/contact`, { method: 'POST', body: JSON.stringify({ ownerPhone: nextPhone, ownerEmail: nextEmail }) });
+                  }
+                  const result = await api<Row>(`/api/v1/platform/requests/${id}/create-tenant`, { method: 'POST', body: JSON.stringify({ overrideReason: reason, accountCode }) });
+                  if (result.password) {
+                    setSecret(`${String(result.accountCode ?? '')} / ${String(result.phone || nextPhone)} / ${String(result.password)}`);
+                  }
+                  board.reload();
+                } catch (caught) {
+                  const fields = caught instanceof ApiError ? caught.fields : {};
+                  if (fields.phone === 'taken' || fields.ownerPhone) {
+                    setTaken('phone');
+                    setError(tx(lang, 'هذا الهاتف مستخدم في صيدلية أخرى. غيّره ثم اضغط تحديث.', 'That phone is already used by another pharmacy. Change it, then update.'));
+                    return;
+                  }
+                  if (fields.email === 'taken' || fields.ownerEmail) {
+                    setTaken('email');
+                    setError(tx(lang, 'هذا البريد مستخدم في صيدلية أخرى. غيّره ثم اضغط تحديث.', 'That email is already used by another pharmacy. Change it, then update.'));
+                    return;
+                  }
+                  if (fields.accountCode) {
+                    setTaken('code');
+                    setError(tx(lang, 'رمز الصيدلية غير متاح. غيّره ثم أنشئ الحساب.', 'That pharmacy code is not available. Change it, then create the account.'));
+                    return;
+                  }
+                  setError(caught instanceof Error ? caught.message : tx(lang, 'تعذر التنفيذ', 'Could not finish'));
                 }
-                throw caught;
-              }
-            }, board.reload, setError);
-          }}>{tx(lang, 'إنشاء حساب الصيدلية', 'Create the pharmacy account')}</button>
+              })();
+            }}>{tx(lang, 'إنشاء حساب الصيدلية', 'Create the pharmacy account')}</button>
+          </>
         ) : null}
         {status === 'TENANT_CREATED' && data.tenantId ? (
           <Link className="jump" to={`/admin/tenants/${String(data.tenantId)}`}>{tx(lang, 'فتح الصيدلية', 'Open the pharmacy')}</Link>
@@ -1028,17 +1047,17 @@ export function RequestDetailPage() {
         ) : null}
       </div>
       <h2>{tx(lang, 'المستندات', 'Documents')}</h2>
-      <label className="field">{tx(lang, 'صلاحية الترخيص', 'License valid until')}<input type="date" value={expiresOn} onChange={(event) => setExpiresOn(event.target.value)} /></label>
       {docs.map((doc) => (
         <article key={String(doc.id)} className="panel">
           <p>
             {doc.kind === 'PHARMACY_LICENSE' ? tx(lang, 'ترخيص الصيدلية', 'Pharmacy license') : tx(lang, 'ترخيص الصيدلي', 'Pharmacist license')}
-            {' — '}{String(doc.licenseNumber)} <Badge value={String(doc.status)} label={statusLabel(lang, String(doc.status))} />
+            {' — '}<Ltr value={String(doc.licenseNumber)} /> <Badge value={String(doc.status)} label={statusLabel(lang, String(doc.status))} />
           </p>
+          <p>{tx(lang, 'الصلاحية', 'Expiry')}: {doc.expiresOn ? day(lang, doc.expiresOn) : '—'}</p>
           {doc.hasFile ? <a href={`/api/v1/platform/documents/${String(doc.id)}`}>{tx(lang, 'عرض المستند', 'View document')}</a> : <p>{tx(lang, 'لا يوجد ملف مرفق.', 'No file was attached.')}</p>}
           {status === 'UNDER_REVIEW' || status === 'SUBMITTED' || status === 'NEED_MORE_INFO' ? (
             <div className="tools">
-              <button type="button" onClick={() => act(`/api/v1/platform/requests/${id}/verify`, { documentId: doc.id, status: 'VALID', reason, expiresOn })}>{tx(lang, 'ترخيص ساري', 'License is valid')}</button>
+              <button type="button" onClick={() => act(`/api/v1/platform/requests/${id}/verify`, { documentId: doc.id, status: 'VALID', reason })}>{tx(lang, 'ترخيص ساري', 'License is valid')}</button>
               <button type="button" className="ghost" onClick={() => act(`/api/v1/platform/requests/${id}/verify`, { documentId: doc.id, status: 'REJECTED', reason })}>{tx(lang, 'رفض المستند', 'Reject the document')}</button>
             </div>
           ) : null}
@@ -1046,6 +1065,14 @@ export function RequestDetailPage() {
       ))}
     </section>
   );
+}
+
+function mapEmbed(latitude: string, longitude: string): string {
+  const lat = Number(latitude);
+  const lon = Number(longitude);
+  const pad = 0.02;
+  const bbox = [lon - pad, lat - pad, lon + pad, lat + pad].map((value) => value.toFixed(5)).join('%2C');
+  return `https://www.openstreetmap.org/export/embed.html?bbox=${bbox}&layer=mapnik&marker=${lat}%2C${lon}`;
 }
 
 const SUDAN_PLACES: { ar: string; en: string; cities: { ar: string; en: string }[] }[] = [
@@ -1098,20 +1125,68 @@ function subscribeLabel(lang: PlatformLang, key: string): string {
 
 function subscribeNote(lang: PlatformLang, key: string, code: string): string {
   if (code === 'email') return tx(lang, 'أدخل بريداً صالحاً.', 'Enter a valid email.');
+  if (code === 'map') return tx(lang, 'تحقق من العنوان على الخريطة قبل الإرسال.', 'Check the address on the map before sending.');
+  if (code === 'mapdown') return tx(lang, 'خدمة الخريطة لم ترد. أعد المحاولة.', 'The map service did not answer. Try again.');
   if (key === 'ownerPhone') return tx(lang, 'أدخل هاتفاً من 6 أرقام على الأقل.', 'Enter a phone of at least 6 digits.');
   if (code === 'range') return tx(lang, 'أدخل رقماً ضمن الحد المسموح.', 'Enter a number inside the allowed limit.');
   return fieldNote(lang, key, code === 'short' ? 'required' : code, subscribeLabel(lang, key));
 }
 
+function LicenseFileField({
+  label,
+  empty,
+  fileName,
+  onFile,
+}: {
+  label: string;
+  empty: string;
+  fileName: string;
+  onFile: (file: File, input: HTMLInputElement) => void;
+}) {
+  return (
+    <label className="field wide license-file">
+      {label}
+      <span className={fileName ? 'license-file-box set' : 'license-file-box'}>
+        <input
+          type="file"
+          accept=".pdf,image/jpeg,image/png,image/webp"
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            if (!file) return;
+            onFile(file, event.currentTarget);
+          }}
+        />
+        <span>{fileName || empty}</span>
+      </span>
+    </label>
+  );
+}
+
+const MAX_LICENSE_FILE_BYTES = 1_000_000;
+
+function licenseFileOk(file: File, lang: PlatformLang): string | null {
+  if (file.size > MAX_LICENSE_FILE_BYTES) {
+    return tx(lang, 'الملف أكبر من 1 ميجابايت.', 'The file is larger than 1 MB.');
+  }
+  const ok = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'].includes(file.type);
+  if (!ok) return tx(lang, 'استخدم PDF أو JPG أو PNG.', 'Use PDF, JPG, or PNG.');
+  return null;
+}
+
 export function SubscribePage() {
+  const fromAdmin = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('from') === 'admin';
   const [lang, setLang] = useState<PlatformLang>(() => (localStorage.getItem('dawaa.lang') === 'en' ? 'en' : 'ar'));
   const [sent, setSent] = useState('');
+  const [access, setAccess] = useState<{ accountCode: string; phone: string; password: string } | null>(null);
   const [error, setError] = useState('');
   const [fields, setFields] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [samePharmacist, setSamePharmacist] = useState(true);
   const [cityOther, setCityOther] = useState(false);
   const [showNote, setShowNote] = useState(false);
+  const [mapBusy, setMapBusy] = useState(false);
+  const [mapError, setMapError] = useState('');
+  const [pin, setPin] = useState<{ latitude: string; longitude: string; label: string; precision: 'address' | 'city' } | null>(null);
   const [offers, setOffers] = useState<Record<string, PlanOffer>>({});
   const [form, setForm] = useState({
     tradeNameAr: '', tradeNameEn: '', ownerName: '', ownerPhone: '', ownerEmail: '',
@@ -1147,6 +1222,8 @@ export function SubscribePage() {
   }
   function pickState(value: string) {
     setCityOther(false);
+    setPin(null);
+    setMapError('');
     setForm((current) => ({ ...current, stateName: value, city: '' }));
     setFields((current) => {
       const next = { ...current };
@@ -1156,6 +1233,8 @@ export function SubscribePage() {
     });
   }
   function pickCity(value: string) {
+    setPin(null);
+    setMapError('');
     if (value === '__other') {
       setCityOther(true);
       edit('city', '');
@@ -1177,6 +1256,41 @@ export function SubscribePage() {
     const plan = SUBSCRIBE_PLANS.find((item) => item.code === code) ?? SUBSCRIBE_PLANS[0];
     setForm((current) => ({ ...current, planCode: plan.code, branchCount: plan.branches, userCount: plan.users, deviceCount: plan.devices }));
   }
+  async function checkMap() {
+    const placeNow = SUDAN_PLACES.find((item) => item.ar === form.stateName);
+    const cityEn = placeNow?.cities.find((item) => item.ar === form.city)?.en ?? form.city;
+    if (form.stateName.trim().length < 2 || form.city.trim().length < 2 || form.addressLine.trim().length < 2) {
+      setMapError(subscribeNote(lang, 'addressLine', 'required'));
+      return;
+    }
+    setMapBusy(true);
+    setMapError('');
+    try {
+      const result = await api<{ latitude: string; longitude: string; label: string; precision: 'address' | 'city' }>('/api/v1/platform/places/check', {
+        method: 'POST',
+        body: JSON.stringify({
+          stateName: form.stateName,
+          stateEn: placeNow?.en ?? form.stateName,
+          city: form.city,
+          cityEn,
+          addressLine: form.addressLine,
+        }),
+      });
+      setPin(result);
+      setFields((current) => {
+        if (!current.addressLine) return current;
+        const next = { ...current };
+        delete next.addressLine;
+        return next;
+      });
+    } catch (caught) {
+      setPin(null);
+      const code = caught instanceof ApiError ? caught.fields.addressLine : '';
+      setMapError(code ? subscribeNote(lang, 'addressLine', code) : (caught instanceof Error ? caught.message : say('تعذر التحقق.', 'The check failed.')));
+    } finally {
+      setMapBusy(false);
+    }
+  }
   function problems(): Record<string, string> {
     const bag: Record<string, string> = {};
     const need = (key: string, value: string) => {
@@ -1189,7 +1303,6 @@ export function SubscribePage() {
     if (!form.ownerEmail.trim()) bag.ownerEmail = subscribeNote(lang, 'ownerEmail', 'required');
     else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.ownerEmail.trim())) bag.ownerEmail = subscribeNote(lang, 'ownerEmail', 'email');
     if (!samePharmacist) need('pharmacistName', form.pharmacistName);
-    need('pharmacistLicense', form.pharmacistLicense);
     need('pharmacyLicense', form.pharmacyLicense);
     need('stateName', form.stateName);
     need('city', form.city);
@@ -1212,11 +1325,24 @@ export function SubscribePage() {
     setBusy(true);
     setError('');
     try {
-      const result = await api<{ id: string }>('/api/v1/platform/requests', {
+      const result = await api<{ id: string; accountCode?: string; phone?: string; password?: string }>('/api/v1/platform/requests', {
         method: 'POST',
-        body: JSON.stringify({ ...form, pharmacistName: samePharmacist ? form.ownerName.trim() : form.pharmacistName }),
+        body: JSON.stringify({
+          ...form,
+          pharmacistLicense: '',
+          pharmacistExpiry: '',
+          pharmacistFile: '',
+          pharmacistFileName: '',
+          pharmacistName: samePharmacist ? form.ownerName.trim() : form.pharmacistName,
+          latitude: pin ? Number(pin.latitude) : null,
+          longitude: pin ? Number(pin.longitude) : null,
+          openTrial: !fromAdmin,
+        }),
       });
       setSent(result.id);
+      if (result.accountCode && result.password) {
+        setAccess({ accountCode: result.accountCode, phone: result.phone || form.ownerPhone.trim(), password: result.password });
+      } else if (fromAdmin) window.location.assign(`/admin/subscription-requests/${result.id}`);
     } catch (caught) {
       if (caught instanceof ApiError && Object.keys(caught.fields).length > 0) {
         const next: Record<string, string> = {};
@@ -1231,6 +1357,8 @@ export function SubscribePage() {
   }
   const say = (ar: string, en: string) => tx(lang, ar, en);
   const place = SUDAN_PLACES.find((item) => item.ar === form.stateName);
+  const homeHref = fromAdmin ? '/admin/subscription-requests' : '/';
+  const homeLabel = fromAdmin ? say('رجوع لطلبات الاشتراك', 'Back to join requests') : say('العودة للرئيسية', 'Back to home');
   return (
     <section className="subscribe-page" dir={lang === 'ar' ? 'rtl' : 'ltr'} lang={lang}>
       <aside className="subscribe-hero">
@@ -1240,22 +1368,35 @@ export function SubscribePage() {
           <p>{say('الاسم، الترخيص، والباقة. الولاية والمدينة والحجم تُختار ولا تُكتب.', 'Name, license, and plan. State, city, and size are choices, not typing.')}</p>
         </div>
         <div className="subscribe-tools">
-          <a href="/">{say('تسجيل الدخول', 'Sign in')}</a>
+          <a href={homeHref}>{homeLabel}</a>
           <button type="button" onClick={() => setLang((current) => (current === 'ar' ? 'en' : 'ar'))}>{lang === 'ar' ? 'English' : 'العربية'}</button>
         </div>
       </aside>
       {sent ? (
         <div className="subscribe-done">
-          <p className="subscribe-kicker">{say('تم الاستلام', 'Received')}</p>
-          <h2>{say('وصل طلب الاشتراك', 'The subscription request is in')}</h2>
-          <p>{say('ستراجع المنصة الصيدلية والتراخيص. الدخول يبقى مغلقاً حتى الاعتماد.', 'The platform reviews the pharmacy and the licenses. Sign-in stays closed until it is approved.')}</p>
-          <p className="subscribe-id" dir="ltr">{sent}</p>
-          <a className="raised" href="/">{say('العودة لتسجيل الدخول', 'Back to sign-in')}</a>
+          <p className="subscribe-kicker">{say('تم الإرسال', 'Sent')}</p>
+          <h2>{access ? say('تم إرسال الطلب وفتح النسخة التجريبية', 'The request was sent and the trial is open') : say('وصل طلب الاشتراك', 'The subscription request is in')}</h2>
+          {access ? (
+            <>
+              <p>{say('النسخة التجريبية لمدة 14 يوماً. اسم المستخدم هو رقم الجوال.', 'This is a trial edition for 14 days. The username is the mobile number.')}</p>
+              <p>{say('رمز الصيدلية', 'Pharmacy code')}: <bdi dir="ltr">{access.accountCode}</bdi></p>
+              <p>{say('اسم المستخدم (الجوال)', 'Username (mobile)')}: <bdi dir="ltr">{access.phone}</bdi></p>
+              <p>{say('كلمة المرور', 'Password')}: <bdi dir="ltr">{access.password}</bdi></p>
+              <p>{say('يرجى التواصل مع', 'Please contact')} <bdi dir="ltr">sales@dwaa.net</bdi></p>
+              <p><bdi dir="ltr">00249123568500</bdi></p>
+            </>
+          ) : (
+            <p>{say('ستراجع المنصة الصيدلية والتراخيص. الدخول يبقى مغلقاً حتى الاعتماد.', 'The platform reviews the pharmacy and the licenses. Sign-in stays closed until it is approved.')}</p>
+          )}
+          <a className="raised" href={homeHref}>{homeLabel}</a>
         </div>
       ) : (
         <form className="subscribe-form" noValidate onSubmit={submit}>
           <div className="subscribe-band">
-            <h2>{say('الصيدلية والمالك', 'Pharmacy and owner')}</h2>
+            <h2>
+              {say('الصيدلية والمالك', 'Pharmacy and owner')}
+              <HelpTip text={say('الاسم بالعربية والإنجليزية، ثم الولاية والمدينة، ثم جوال المالك. هذا الجوال هو الذي يدخل به لاحقاً.', 'Arabic and English names, then the state and city, then the owner’s mobile. That mobile is what they will sign in with later.')} />
+            </h2>
             <div className="subscribe-grid">
               <Flagged name="tradeNameAr" label={subscribeLabel(lang, 'tradeNameAr')} message={fields.tradeNameAr}>
                 <input autoComplete="organization" value={form.tradeNameAr} onChange={(event) => edit('tradeNameAr', event.target.value)} />
@@ -1280,8 +1421,30 @@ export function SubscribePage() {
                 {fields.city ? <small id="city-error" className="field-error">{fields.city}</small> : null}
               </label>
               <Flagged className="wide" name="addressLine" label={subscribeLabel(lang, 'addressLine')} message={fields.addressLine}>
-                <input autoComplete="street-address" value={form.addressLine} onChange={(event) => edit('addressLine', event.target.value)} />
+                <input autoComplete="street-address" value={form.addressLine} onChange={(event) => {
+                  setPin(null);
+                  setMapError('');
+                  edit('addressLine', event.target.value);
+                }} />
               </Flagged>
+              <div className="wide place-check">
+                <button type="button" className="ghost" disabled={mapBusy} onClick={() => void checkMap()}>
+                  {mapBusy ? say('لحظة…', 'One moment…') : say('الخريطة اختيارية', 'Map (optional)')}
+                </button>
+                <p className="hint">{say('العنوان المكتوب يكفي. الخريطة اختيار لإظهار المكان، وليست شرطاً للإرسال.', 'The written address is enough. The map only shows the place, and sending does not require it.')}</p>
+                {mapError ? <small className="field-error">{mapError}</small> : null}
+                {pin ? (
+                  <>
+                    <p className="hint">
+                      {pin.precision === 'city'
+                        ? say('الخريطة وجدت المدينة. يمكنك الإرسال من دونها.', 'The map found the city. You can send without it.')
+                        : say('الخريطة وجدت العنوان. يمكنك الإرسال من دونها.', 'The map found this address. You can send without it.')}
+                      {' '}{pin.label}
+                    </p>
+                    <iframe title={say('خريطة العنوان', 'Address map')} src={mapEmbed(pin.latitude, pin.longitude)} />
+                  </>
+                ) : null}
+              </div>
               <Flagged name="ownerName" label={subscribeLabel(lang, 'ownerName')} message={fields.ownerName}>
                 <input autoComplete="name" value={form.ownerName} onChange={(event) => edit('ownerName', event.target.value)} />
               </Flagged>
@@ -1294,7 +1457,10 @@ export function SubscribePage() {
             </div>
           </div>
           <div className="subscribe-band">
-            <h2>{say('التراخيص', 'Licenses')}</h2>
+            <h2>
+              {say('التراخيص', 'Licenses')}
+              <HelpTip text={say('رقم ترخيص الصيدلية مطلوب، وتاريخ الصلاحية إن وُجد. الملف اختياري (PDF أو صورة، حتى 1 ميجابايت).', 'The pharmacy license number is required, and the expiry date if you have it. The file is optional (PDF or image, up to 1 MB).')} />
+            </h2>
             <label className="subscribe-check">
               <input type="checkbox" checked={samePharmacist} onChange={(event) => {
                 setSamePharmacist(event.target.checked);
@@ -1313,40 +1479,30 @@ export function SubscribePage() {
                   <input autoComplete="name" value={form.pharmacistName} onChange={(event) => edit('pharmacistName', event.target.value)} />
                 </Flagged>
               )}
-              <Flagged name="pharmacistLicense" label={subscribeLabel(lang, 'pharmacistLicense')} message={fields.pharmacistLicense}>
-                <input value={form.pharmacistLicense} onChange={(event) => edit('pharmacistLicense', event.target.value)} />
-              </Flagged>
               <Flagged name="pharmacyLicense" label={subscribeLabel(lang, 'pharmacyLicense')} message={fields.pharmacyLicense}>
                 <input value={form.pharmacyLicense} onChange={(event) => edit('pharmacyLicense', event.target.value)} />
               </Flagged>
-              <Flagged name="pharmacistExpiry" label={say('صلاحية الصيدلي', 'Pharmacist expiry')} message={fields.pharmacistExpiry}>
-                <input type="date" value={form.pharmacistExpiry} onChange={(event) => edit('pharmacistExpiry', event.target.value)} />
-              </Flagged>
-              <Flagged name="pharmacyExpiry" label={say('صلاحية الصيدلية', 'Pharmacy expiry')} message={fields.pharmacyExpiry}>
+              <Flagged name="pharmacyExpiry" label={say('صلاحية الترخيص', 'License expiry')} message={fields.pharmacyExpiry}>
                 <input type="date" value={form.pharmacyExpiry} onChange={(event) => edit('pharmacyExpiry', event.target.value)} />
               </Flagged>
-              <label className="field">
-                {say('ملف الصيدلي', 'Pharmacist file')}
-                <input type="file" onChange={(event) => {
-                  const file = event.target.files?.[0];
-                  if (!file) return;
-                  void readFile(file).then((content) => setForm((current) => ({ ...current, pharmacistFile: content, pharmacistFileName: file.name })));
-                }} />
-                {form.pharmacistFileName ? <small>{form.pharmacistFileName}</small> : null}
-              </label>
-              <label className="field">
-                {say('ملف الصيدلية', 'Pharmacy file')}
-                <input type="file" onChange={(event) => {
-                  const file = event.target.files?.[0];
-                  if (!file) return;
+              <LicenseFileField
+                label={say('ملف الصيدلية', 'Pharmacy file')}
+                empty={say('لم يُختر ملف', 'No file chosen')}
+                fileName={form.pharmacyFileName}
+                onFile={(file, input) => {
+                  const problem = licenseFileOk(file, lang);
+                  if (problem) { setError(problem); input.value = ''; return; }
+                  setError('');
                   void readFile(file).then((content) => setForm((current) => ({ ...current, pharmacyFile: content, pharmacyFileName: file.name })));
-                }} />
-                {form.pharmacyFileName ? <small>{form.pharmacyFileName}</small> : null}
-              </label>
+                }}
+              />
             </div>
           </div>
           <div className="subscribe-band">
-            <h2>{say('الباقة', 'Plan')}</h2>
+            <h2>
+              {say('الباقة', 'Plan')}
+              <HelpTip text={say('الباقة تحدد عدد الفروع والمستخدمين. سعر السلسلة لكل فرع. يمكنك زيادة العدد بالأزرار ضمن حد الباقة.', 'The plan sets how many branches and users are included. The chain price is per branch. Use the buttons to raise the count within the plan limit.')} />
+            </h2>
             <div className="cycle-pick">
               {BILLING_CYCLES.map((cycle) => (
                 <button key={cycle.code} type="button" className={form.billingCycle === cycle.code ? 'cycle on' : 'cycle'} onClick={() => edit('billingCycle', cycle.code)}>
@@ -1402,7 +1558,9 @@ export function CatalogPage() {
   const [q, setQ] = useState('');
   const [query, setQuery] = useState('');
   const board = useLoad<{ total: number; rows: Row[] }>(`/api/v1/platform/catalog?q=${encodeURIComponent(query)}`);
+  const dupes = useLoad<{ groups: { codes: string[] }[] }>('/api/v1/platform/catalog/duplicates');
   const [error, setError] = useState('');
+  const [csv, setCsv] = useState('');
   const [form, setForm] = useState({
     code: '', itemType: 'Medicine', nameAr: '', nameEn: '', genericName: '', strength: '', dosageForm: 'TABLET',
     manufacturer: '', country: 'SD', categoryName: 'عام', atcCode: '', barcode: '', unitName: 'علبة', factorToBase: 1,
@@ -1413,14 +1571,22 @@ export function CatalogPage() {
   return (
     <section>
       <div className="page-head">
-        <h1>{tx(lang, 'الدليل الدوائي', 'Medicine catalog')}</h1>
-        <p>{tx(lang, 'التنزيل والتحديث من مجموعة الأدوية. هنا تبحث في الدليل أو تضيف صنفاً يدوياً ثم ترسله للصيدليات.', 'Download and update live in the medicine group. Search the catalog here, or add one item by hand and send it to the pharmacies.')}</p>
+        <h1>{tx(lang, 'الدليل الدوائي العالمي', 'Global medical library')}</h1>
+        <p>{tx(lang, 'النشر يجعل الصنف قابلاً للبحث في كل صيدلية فوراً. لا يُنسخ سجل الدواء إلى كل صيدلية.', 'Publishing makes the item searchable in every pharmacy at once. The medicine record is not copied into each pharmacy.')}</p>
       </div>
       <form className="tools" onSubmit={(event) => { event.preventDefault(); setQuery(q); }}>
         <input value={q} onChange={(event) => setQ(event.target.value)} placeholder={tx(lang, 'اسم أو رمز', 'Name or code')} />
         <button type="submit">{tx(lang, 'بحث', 'Search')}</button>
       </form>
-      {board.data && board.data.total > board.data.rows.length ? <p>{tx(lang, `عرض ${board.data.rows.length} من ${board.data.total}. ابحث لتضييق القائمة.`, `Showing ${board.data.rows.length} of ${board.data.total}. Search to narrow the list.`)}</p> : null}
+      {dupes.data && dupes.data.groups.length > 0 ? <p className="hint">{tx(lang, `تكرارات محتملة: ${dupes.data.groups.length}`, `Possible duplicates: ${dupes.data.groups.length}`)} — {dupes.data.groups.slice(0, 3).map((group) => group.codes.join(' / ')).join(' · ')}</p> : null}
+      <p><a href="/api/v1/platform/catalog/export.xlsx">{tx(lang, 'تصدير إكسل', 'Excel export')}</a></p>
+      <form className="panel" onSubmit={(event) => {
+        event.preventDefault();
+        void run(() => api('/api/v1/platform/catalog/import', { method: 'POST', body: JSON.stringify({ csv, publish: true }) }).then(() => undefined), board.reload, setError);
+      }}>
+        <label className="field">{tx(lang, 'استيراد CSV', 'Import CSV')}<textarea rows={3} value={csv} onChange={(event) => setCsv(event.target.value)} placeholder="code,nameAr,nameEn,genericName,dosageForm,strength,manufacturer,barcode" /></label>
+        <button type="submit">{tx(lang, 'استيراد ونشر', 'Import and publish')}</button>
+      </form>
       <form className="panel" onSubmit={(event) => {
         event.preventDefault();
         void run(() => api('/api/v1/platform/catalog', { method: 'POST', body: JSON.stringify(form) }).then(() => undefined), board.reload, setError);
@@ -1448,7 +1614,7 @@ export function CatalogPage() {
                 <td>{String(row.nameAr)}</td>
                 <td>{String(row.itemType)}</td>
                 <td><Badge value={String(row.status)} /></td>
-                <td><button onClick={() => run(() => api(`/api/v1/platform/catalog/${String(row.id)}/push`, { method: 'POST' }).then(() => undefined), board.reload, setError)}>إرسال للصيدليات</button></td>
+                <td><button onClick={() => run(() => api(`/api/v1/platform/catalog/${String(row.id)}/push`, { method: 'POST' }).then(() => undefined), board.reload, setError)}>{tx(lang, 'نشر للجميع', 'Publish to all')}</button></td>
               </tr>
             ))}
           </tbody>
@@ -1495,7 +1661,7 @@ export function ItemRequestsPage() {
     <section>
       <div className="page-head">
         <h1>{tx(lang, 'طلبات الأصناف الجديدة', 'New medicine requests')}</h1>
-        <p>{tx(lang, 'اعتمد الصنف للدليل، أو ارفضه، أو علّمه كمكرر إذا كان موجوداً.', 'Approve the item into the catalog, reject it, or mark it as a duplicate when it already exists.')}</p>
+        <p>{tx(lang, 'اعتمد الصنف لينشر في الدليل العالمي، أو اربطه بصنف موجود، أو ارفضه.', 'Approve the item so it is published in the global library, link it to an existing item, or reject it.')}</p>
       </div>
       <Flagged name="reason" label={tx(lang, 'السبب', 'Reason')} message={reasonError}>
         <input value={reason} onChange={(event) => { setReason(event.target.value); setReasonError(''); }} />
@@ -1507,11 +1673,15 @@ export function ItemRequestsPage() {
         return (
           <article key={String(row.id)} className="panel">
             <p>{String(row.nameAr)} — {String(row.nameEn)} <Badge value={status} label={statusLabel(lang, status)} /></p>
+            <p className="hint">{[row.genericName, row.manufacturer, row.strength, row.packaging, row.barcode].filter(Boolean).map(String).join(' · ')}</p>
             {suggestions.length > 0 ? (
               <p className="hint">{tx(lang, 'يشبه صنفاً موجوداً', 'Looks like an existing item')}: {suggestions.map((item) => item.nameAr).join(lang === 'ar' ? '، ' : ', ')}</p>
             ) : null}
             <div className="tools">
-              <button type="button" onClick={() => decide(String(row.id), 'APPROVED')}>{tx(lang, 'اعتماد للدليل', 'Approve into the catalog')}</button>
+              <button type="button" onClick={() => decide(String(row.id), 'APPROVED')}>{tx(lang, 'نشر في الدليل', 'Publish to the library')}</button>
+              {suggestions.map((item) => (
+                <button key={item.id} type="button" className="ghost" onClick={() => decide(String(row.id), 'MERGED_WITH_EXISTING', item.id)}>{tx(lang, 'ربط بـ', 'Link to')} {item.nameAr}</button>
+              ))}
               <button type="button" className="ghost" onClick={() => decide(String(row.id), 'REJECTED')}>{tx(lang, 'رفض', 'Reject')}</button>
               <button type="button" className="ghost" onClick={() => decide(String(row.id), 'DUPLICATE_SUSPECTED', suggestions[0]?.id ?? '')}>{tx(lang, 'مكرر محتمل', 'Possible duplicate')}</button>
             </div>
@@ -1584,7 +1754,7 @@ export function AccountsPage() {
     <section>
       <div className="page-head">
         <h1>{tx(lang, 'حسابات الدخول', 'Sign-in accounts')}</h1>
-        <p>{tx(lang, 'كل حساب يملكه مالك صيدلية. من هنا تعيد كلمة المرور أو توقف الدخول. إنشاء صيدلية جديدة يتم من طلب الاشتراك.', 'Each row is a pharmacy sign-in. Reset the password or stop the sign-in here. A new pharmacy is created from a join request.')}</p>
+        <p>{tx(lang, 'كل حساب يدخل باسم المستخدم وهو رقم الجوال، لا البريد. من هنا تعيد كلمة المرور أو توقف الدخول.', 'Each account signs in with the username, which is the mobile number, not the email. Reset the password or stop the sign-in here.')}</p>
       </div>
       {error ? <p className="error">{error}</p> : null}
       {secret ? <p className="panel">{tx(lang, 'كلمة المرور الجديدة، تظهر مرة واحدة:', 'New password, shown once:')} <strong>{secret}</strong></p> : null}
@@ -1594,7 +1764,7 @@ export function AccountsPage() {
             <tr>
               <th>{tx(lang, 'الصيدلية', 'Pharmacy')}</th>
               <th>{tx(lang, 'الاسم', 'Name')}</th>
-              <th>{tx(lang, 'البريد', 'Email')}</th>
+              <th>{tx(lang, 'اسم المستخدم (الجوال)', 'Username (mobile)')}</th>
               <th>{tx(lang, 'الدور', 'Role')}</th>
               <th>{tx(lang, 'الحالة', 'Status')}</th>
               <th></th>
@@ -1605,7 +1775,7 @@ export function AccountsPage() {
               <tr key={`${String(row.tenantId)}-${String(row.id)}`}>
                 <td><Link to={`/admin/tenants/${String(row.tenantId)}`}>{String(row.tenantName)}</Link></td>
                 <td>{String(row.displayName)}</td>
-                <td>{String(row.email ?? '')}</td>
+                <td><Ltr value={String(row.phone || '—')} /></td>
                 <td>{tx(lang, roleName(String(row.role))[0], roleName(String(row.role))[1])}</td>
                 <td>{row.isActive === false ? tx(lang, 'موقوف', 'Disabled') : tx(lang, 'يعمل', 'Active')}</td>
                 <td className="tools">
@@ -1792,7 +1962,7 @@ export function UsersPage() {
   const { lang } = usePlatformLang();
   const board = useLoad<Row[]>('/api/v1/platform/users');
   const [error, setError] = useState('');
-  const [form, setForm] = useState({ email: '', displayName: '', password: '', roleCode: 'SUPPORT_ADMIN' });
+  const [form, setForm] = useState({ email: '', phone: '', displayName: '', password: '', roleCode: 'SUPPORT_ADMIN' });
   if (board.loading) return <p>{tx(lang, 'جار التحميل…', 'Loading…')}</p>;
   if (board.error) return <p className="error">{board.error}</p>;
   return (
@@ -1808,6 +1978,7 @@ export function UsersPage() {
         <div className="grid">
           <label className="field">{tx(lang, 'الاسم', 'Name')}<input value={form.displayName} onChange={(event) => setForm({ ...form, displayName: event.target.value })} required /></label>
           <label className="field">{tx(lang, 'البريد', 'Email')}<input type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} required /></label>
+          <label className="field">{tx(lang, 'الجوال', 'Mobile')}<input dir="ltr" value={form.phone} onChange={(event) => setForm({ ...form, phone: event.target.value })} required minLength={6} /></label>
           <label className="field">{tx(lang, 'كلمة المرور', 'Password')}<input type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} required minLength={10} /></label>
           <label className="field">{tx(lang, 'الدور', 'Role')}
             <select value={form.roleCode} onChange={(event) => setForm({ ...form, roleCode: event.target.value })}>
@@ -1819,7 +1990,7 @@ export function UsersPage() {
         <button type="submit">{tx(lang, 'إضافة مستخدم المنصة', 'Add a platform user')}</button>
       </form>
       {(board.data ?? []).map((row) => (
-        <p key={String(row.id)}>{String(row.displayName)} — {String(row.email)} — {String(row.roleCode)} {row.isActive === false ? <Badge value="SUSPENDED" label={tx(lang, 'موقوف', 'Disabled')} /> : null}</p>
+        <p key={String(row.id)}>{String(row.displayName)} — <Ltr value={String(row.phone ?? '')} /> — {String(row.email)} — {String(row.roleCode)} {row.isActive === false ? <Badge value="SUSPENDED" label={tx(lang, 'موقوف', 'Disabled')} /> : null}</p>
       ))}
     </section>
   );

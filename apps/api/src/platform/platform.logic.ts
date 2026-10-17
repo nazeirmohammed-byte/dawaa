@@ -116,6 +116,23 @@ export function licenseNeedsAlert(expiresOn: Date, now: Date, withinDays = 30): 
   return expiresOn.getTime() - now.getTime() <= withinDays * 24 * 60 * 60 * 1000;
 }
 
+export function systemHealthCounts(input: {
+  tenants: { status: string; readOnly: boolean }[];
+  subscriptions: { status: string; endsOn: string | null }[];
+  invoices: { status: string; dueOn: string }[];
+  rejectedProofs: number;
+  today: string;
+}): { suspended: number; readOnly: number; expiringSubscriptions: number; failedPayments: number; overdueInvoices: number } {
+  const day = (value: string) => Math.round((new Date(`${value}T00:00:00Z`).getTime() - new Date(`${input.today}T00:00:00Z`).getTime()) / 86_400_000);
+  return {
+    suspended: input.tenants.filter((row) => row.status === 'SUSPENDED').length,
+    readOnly: input.tenants.filter((row) => row.readOnly).length,
+    expiringSubscriptions: input.subscriptions.filter((row) => row.endsOn !== null && ['ACTIVE', 'TRIAL'].includes(row.status) && day(row.endsOn) >= 0 && day(row.endsOn) <= 14).length,
+    failedPayments: input.invoices.filter((row) => row.status === 'FAILED' || row.status === 'REJECTED').length + input.rejectedProofs,
+    overdueInvoices: input.invoices.filter((row) => row.status === 'ISSUED' && day(row.dueOn) < 0).length,
+  };
+}
+
 export type CatalogPush = {
   nameAr: string;
   nameEn: string;

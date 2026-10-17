@@ -11,7 +11,8 @@ GRANT SELECT ON dbo.UserBranchRoles TO dawaa_rls_bypass;
 GO
 
 CREATE OR ALTER PROCEDURE dbo.usp_FindUserForLogin
-  @Identifier NVARCHAR(320)
+  @TenantCode NVARCHAR(32),
+  @Phone NVARCHAR(20)
 WITH EXECUTE AS N'dawaa_rls_bypass'
 AS
 BEGIN
@@ -30,6 +31,7 @@ BEGIN
     t.tradeNameEn,
     t.type AS tenantType,
     t.featureFlags,
+    t.accountCode AS tenantAccountCode,
     b.branchId
   FROM dbo.Users AS u
   INNER JOIN dbo.Tenants AS t ON t.id = u.tenantId
@@ -41,7 +43,8 @@ BEGIN
     ORDER BY ubr.createdAt ASC
   ) AS b
   WHERE u.isDeleted = 0
-    AND (u.email = @Identifier OR u.phone = @Identifier);
+    AND t.accountCode = @TenantCode
+    AND u.phone = @Phone;
 END
 GO
 

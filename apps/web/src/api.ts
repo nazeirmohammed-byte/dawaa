@@ -50,9 +50,11 @@ export type Profile = {
     tradeNameEn: string | null;
     status: string;
     trialEndsAt: string | null;
+    accountCode?: string;
   };
   branch: { id: string; nameAr: string; nameEn: string | null } | null;
   role: { code: string; nameAr: string; nameEn: string } | null;
+  permissions?: string[];
   network: {
     management: 'INDEPENDENT' | 'SHARED';
     branchLimit: number;
@@ -85,10 +87,29 @@ export type HomeBoard = {
   lowStock: { id: string; nameAr: string; nameEn: string; qty: number; reorderLevel: number }[];
   expiry: { nameAr: string; nameEn: string; batchNo: string; expiry: string; qty: number; daysLeft: number }[];
   purchases: { docNo: string; supplierAr: string; supplierEn: string; orderedAt: string; total: string; status: string }[];
+  stocking?: {
+    pendingReceipts: number;
+    receivedLines: number;
+    awaitingPosting: number;
+    fullyStocked: number;
+    pendingQty: number;
+    availableQty: number;
+    newlyStocked: number;
+  } | null;
   sales: { soldAt: string; docNo: string; customerName: string; total: string; paymentMethod: string; status: string }[];
   accounts: { receiptsToday: string; paymentsToday: string; customerDue: string; supplierDue: string };
   customers: { nameAr: string; nameEn: string; balance: string }[];
-  products: { id: string; nameAr: string; nameEn: string; genericName: string; sku: string; form: string; sellPrice: string; qty: number }[];
+  products: {
+    id: string;
+    nameAr: string;
+    nameEn: string;
+    genericName: string;
+    sku: string;
+    form: string;
+    sellPrice: string;
+    qty: number;
+    pack?: { outer: 'BOX' | 'STRIP' | 'BOTTLE' | 'PIECE'; inner: 'STRIP' | 'BOTTLE' | 'PIECE'; perBox: number; perInner: number } | null;
+  }[];
 };
 
 export type Board = {
@@ -127,4 +148,7 @@ export type ReceiptPreview = {
   changeDue: string;
   paymentMethod: string;
   widthMm: number;
+  footerAr?: string;
+  footerEn?: string;
+  showPhone?: boolean;
 };

@@ -1,12 +1,14 @@
-import { Body, Controller, Get, Param, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Header, Param, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
+import ExcelJS from 'exceljs';
 import { z } from 'zod';
 import { TokenService } from '../auth/token.service';
 import { Inject } from '@nestjs/common';
 import { APP_CONFIG, type AppConfig } from '../config';
 import { DomainError } from '../http/domain-error';
 import { ZodValidationPipe } from '../http/zod.pipe';
+import { lookupOnMap } from '../places/map-check';
 import { clearPlatformCookie, setPlatformCookie } from './platform.cookies';
 import { PlatformGuard, type PlatformRequest } from './platform.guard';
 import { PlatformService } from './platform.service';
@@ -33,11 +35,14 @@ const requestSchema = z.object({
   ownerPhone: z.string().trim().min(6).max(20),
   ownerEmail: z.string().trim().email().max(320),
   pharmacistName: z.string().trim().min(2).max(200),
-  pharmacistLicense: z.string().trim().min(2).max(100),
+  pharmacistLicense: z.string().trim().max(100).optional().default(''),
   pharmacyLicense: z.string().trim().min(2).max(100),
   stateName: z.string().trim().min(2).max(100),
   city: z.string().trim().min(2).max(100),
   addressLine: z.string().trim().min(2).max(300),
+  latitude: z.union([z.number().gte(8.4).lte(22.3), z.null()]).optional().default(null),
+  longitude: z.union([z.number().gte(21.7).lte(38.7), z.null()]).optional().default(null),
+  openTrial: z.boolean().optional().default(false),
   planCode: z.string().trim().min(2).max(32),
   billingCycle: z.enum(['MONTHLY', 'DAILY', 'YEARLY', 'PAYG']).optional().default('MONTHLY'),
   branchCount: z.number().int().min(1).max(50),
@@ -63,11 +68,11 @@ export class PlatformPublicController {
 
   @Post('login')
   async login(
-    @Body(new ZodValidationPipe(z.object({ email: z.string().trim().email(), password: z.string().min(10).max(200) })))
-    body: { email: string; password: string },
+    @Body(new ZodValidationPipe(z.object({ phone: z.string().trim().min(6).max(20), password: z.string().min(10).max(200) })))
+    body: { phone: string; password: string },
     @Res({ passthrough: true }) response: Response,
   ) {
-    const profile = await this.platform.authenticate(body.email, body.password);
+    const profile = await this.platform.authenticate(body.phone, body.password);
     setPlatformCookie(response, await this.tokens.signPlatform(profile.id), this.config);
     return profile;
   }
@@ -81,6 +86,27 @@ export class PlatformPublicController {
   @Post('requests')
   submit(@Body(new ZodValidationPipe(requestSchema)) body: z.infer<typeof requestSchema>) {
     return this.platform.submitRequest(body);
+  }
+
+  @Post('places/check')
+  async checkPlace(
+    @Body(new ZodValidationPipe(z.object({
+      stateName: z.string().trim().max(100).default(''),
+      stateEn: z.string().trim().max(100).default(''),
+      city: z.string().trim().min(2).max(100),
+      cityEn: z.string().trim().max(100).default(''),
+      addressLine: z.string().trim().max(300).default(''),
+    })))
+    body: { stateName: string; stateEn: string; city: string; cityEn: string; addressLine: string },
+  ) {
+    try {
+      const pin = await lookupOnMap(body);
+      if (!pin) throw new DomainError('VALIDATION_ERROR', 400, { fields: { addressLine: 'map' } });
+      return pin;
+    } catch (error) {
+      if (error instanceof DomainError) throw error;
+      throw new DomainError('VALIDATION_ERROR', 503, { fields: { addressLine: 'mapdown' } });
+    }
   }
 
   @Get('plans/public')
@@ -165,6 +191,16 @@ export class PlatformController {
     return this.platform.setTenantStatus(this.actor(request), this.id(id), 'ACTIVE', body.reason);
   }
 
+  @Post('tenants/:id/standard')
+  standard(@Req() request: PlatformRequest, @Param('id') id: string, @Body(new ZodValidationPipe(z.object({ reason }))) body: { reason: string }) {
+    return this.platform.activateStandard(this.actor(request), this.id(id), body.reason);
+  }
+
+  @Post('tenants/:id/trial-cancel')
+  cancelTrial(@Req() request: PlatformRequest, @Param('id') id: string, @Body(new ZodValidationPipe(z.object({ reason }))) body: { reason: string }) {
+    return this.platform.cancelTrial(this.actor(request), this.id(id), body.reason);
+  }
+
   @Post('tenants/:id/trial')
   trial(
     @Req() request: PlatformRequest,
@@ -219,8 +255,8 @@ export class PlatformController {
       new ZodValidationPipe(
         z.object({
           displayName: z.string().trim().min(2).max(200),
-          email: z.string().trim().email(),
-          phone: z.string().trim().max(20).optional().default(''),
+          email: z.union([z.string().trim().email().max(320), z.literal('')]).optional().default(''),
+          phone: z.string().trim().min(6).max(20),
           branchId: uuid,
         }),
       ),
@@ -306,13 +342,28 @@ export class PlatformController {
     return this.platform.documentFile(this.actor(request), this.id(id));
   }
 
+  @Post('requests/:id/contact')
+  updateContact(
+    @Req() request: PlatformRequest,
+    @Param('id') id: string,
+    @Body(new ZodValidationPipe(z.object({
+      ownerPhone: z.string().trim().min(6).max(20),
+      ownerEmail: z.string().trim().email().max(320),
+    }))) body: { ownerPhone: string; ownerEmail: string },
+  ) {
+    return this.platform.updateRequestContact(this.actor(request), this.id(id), body.ownerPhone, body.ownerEmail);
+  }
+
   @Post('requests/:id/create-tenant')
   createTenant(
     @Req() request: PlatformRequest,
     @Param('id') id: string,
-    @Body(new ZodValidationPipe(z.object({ overrideReason: z.string().max(500).optional().default('') }))) body: { overrideReason: string },
+    @Body(new ZodValidationPipe(z.object({
+      overrideReason: z.string().max(500).optional().default(''),
+      accountCode: z.string().trim().max(16).optional().default(''),
+    }))) body: { overrideReason: string; accountCode: string },
   ) {
-    return this.platform.createTenant(this.actor(request), this.id(id), body.overrideReason);
+    return this.platform.createTenant(this.actor(request), this.id(id), body.overrideReason, body.accountCode);
   }
 
   @Get('medicines')
@@ -375,6 +426,15 @@ export class PlatformController {
           requiresPrescription: z.boolean().optional().default(false),
           storageCondition: z.string().max(200).optional().default(''),
           status: z.enum(['draft', 'active', 'inactive', 'duplicate', 'needs review']),
+          descriptionEn: z.string().max(1000).optional().default(''),
+          descriptionAr: z.string().max(1000).optional().default(''),
+          brandNameEn: z.string().max(200).optional().default(''),
+          brandNameAr: z.string().max(200).optional().default(''),
+          packSize: z.string().max(80).optional().default(''),
+          packUnit: z.string().max(40).optional().default(''),
+          registrationNumber: z.string().max(80).optional().default(''),
+          modelNumber: z.string().max(80).optional().default(''),
+          regulatoryReference: z.string().max(120).optional().default(''),
         }),
       ),
     )
@@ -398,9 +458,59 @@ export class PlatformController {
       requiresPrescription: boolean;
       storageCondition: string;
       status: string;
+      descriptionEn: string;
+      descriptionAr: string;
+      brandNameEn: string;
+      brandNameAr: string;
+      packSize: string;
+      packUnit: string;
+      registrationNumber: string;
+      modelNumber: string;
+      regulatoryReference: string;
     },
   ) {
     return this.platform.saveCatalog(this.actor(request), body);
+  }
+
+  @Get('catalog/duplicates')
+  catalogDuplicates(@Req() request: PlatformRequest) {
+    return this.platform.catalogDuplicates(this.actor(request));
+  }
+
+  @Get('catalog/export.xlsx')
+  @Header('content-type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  async catalogExport(@Req() request: PlatformRequest, @Res() response: Response) {
+    const rows = await this.platform.catalogSheet(this.actor(request));
+    const book = new ExcelJS.Workbook();
+    const arabic = (request.header('accept-language') ?? '').toLowerCase().includes('ar');
+    const sheet = book.addWorksheet('library', { views: [{ rightToLeft: arabic, state: 'frozen', ySplit: 1 }] });
+    sheet.addRow(arabic
+      ? ['الرمز', 'الاسم العربي', 'الاسم الإنجليزي', 'الاسم العلمي', 'الشكل', 'التركيز', 'الشركة', 'الحالة']
+      : ['Code', 'Arabic name', 'English name', 'Generic', 'Form', 'Strength', 'Manufacturer', 'Status']);
+    sheet.getRow(1).font = { bold: true };
+    for (const row of rows) {
+      sheet.addRow([row.code, row.nameAr, row.nameEn, row.genericName, row.dosageForm, row.strength, row.manufacturer, row.status]);
+    }
+    response.setHeader('content-disposition', 'attachment; filename="dawaa-global-library.xlsx"');
+    await book.xlsx.write(response);
+    response.end();
+  }
+
+  @Post('catalog/import')
+  importCatalog(
+    @Req() request: PlatformRequest,
+    @Body(new ZodValidationPipe(z.object({
+      csv: z.string().min(1).max(2_000_000),
+      publish: z.boolean().optional().default(false),
+    })))
+    body: { csv: string; publish: boolean },
+  ) {
+    return this.platform.importCatalogCsv(this.actor(request), body.csv, body.publish);
+  }
+
+  @Get('catalog/:id/history')
+  catalogHistory(@Req() request: PlatformRequest, @Param('id') id: string) {
+    return this.platform.catalogHistory(this.actor(request), this.id(id));
   }
 
   @Post('catalog/:id/push')
@@ -594,6 +704,7 @@ export class PlatformController {
       new ZodValidationPipe(
         z.object({
           email: z.string().trim().email(),
+          phone: z.string().trim().min(6).max(20),
           displayName: z.string().trim().min(2).max(200),
           password: z.string().min(10).max(200),
           roleCode: z.enum([
@@ -607,7 +718,7 @@ export class PlatformController {
         }),
       ),
     )
-    body: { email: string; displayName: string; password: string; roleCode: string },
+    body: { email: string; phone: string; displayName: string; password: string; roleCode: string },
   ) {
     return this.platform.saveUser(this.actor(request), body);
   }

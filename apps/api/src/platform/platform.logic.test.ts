@@ -7,6 +7,7 @@ import {
   dayPriceFromMonth,
   licenseNeedsAlert,
   mergeLimitPrices,
+  systemHealthCounts,
   planPrices,
   subscriptionCharge,
   unitForCycle,
@@ -82,5 +83,33 @@ describe('catalog money and push', () => {
     expect(patch).not.toHaveProperty('sellPrice');
     expect(patch).not.toHaveProperty('qty');
     expect(patch.nameAr).toBe('أموكسيسيلين');
+  });
+});
+
+describe('platform system health', () => {
+  it('counts subscription and payment risk from real rows', () => {
+    const health = systemHealthCounts({
+      today: '2026-10-15',
+      tenants: [
+        { status: 'SUSPENDED', readOnly: true },
+        { status: 'ACTIVE', readOnly: false },
+      ],
+      subscriptions: [
+        { status: 'ACTIVE', endsOn: '2026-10-20' },
+        { status: 'ACTIVE', endsOn: '2027-01-01' },
+        { status: 'TRIAL', endsOn: '2026-10-01' },
+      ],
+      invoices: [
+        { status: 'ISSUED', dueOn: '2026-10-01' },
+        { status: 'FAILED', dueOn: '2026-10-20' },
+        { status: 'PAID', dueOn: '2026-09-01' },
+      ],
+      rejectedProofs: 1,
+    });
+    expect(health.suspended).toBe(1);
+    expect(health.readOnly).toBe(1);
+    expect(health.expiringSubscriptions).toBe(1);
+    expect(health.failedPayments).toBe(2);
+    expect(health.overdueInvoices).toBe(1);
   });
 });
