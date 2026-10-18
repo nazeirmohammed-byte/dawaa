@@ -59,6 +59,7 @@ const saleSchema = z.object({
   customerName: z.string().trim().min(1).max(200),
   discount: moneyText,
   paid: moneyText,
+  hold: z.boolean().optional(),
   paymentMethod: z.enum(['CASH', 'BANKAK', 'FAWRY', 'TRANSFER']),
   lines: z
     .array(
@@ -99,6 +100,7 @@ const purchaseSchema = z.object({
           qty: z.number().int().positive().max(1_000_000),
           unitCost: optionalMoney,
           sellPrice: optionalMoney,
+          unitCode: z.string().trim().max(16).optional(),
           pack: itemPackSchema.optional(),
         })
         .refine((line) => Boolean(line.productId) || line.code.length > 0),
@@ -287,9 +289,27 @@ export class OpsController {
     return this.ops.sales(this.tenant(request), this.actor(request), this.branch(request), this.header(request));
   }
 
+  @Get('sales/waiting')
+  waitingSales(@Req() request: AuthenticatedRequest) {
+    return this.ops.waitingSales(this.tenant(request), this.actor(request), this.branch(request), this.header(request));
+  }
+
   @Post('sales')
   createSale(@Req() request: AuthenticatedRequest, @Body(new ZodValidationPipe(saleSchema)) body: z.infer<typeof saleSchema>) {
     return this.ops.createSale(this.tenant(request), this.branch(request), this.actor(request), this.header(request), body);
+  }
+
+  @Post('sales/receive')
+  receiveSale(
+    @Req() request: AuthenticatedRequest,
+    @Body(new ZodValidationPipe(z.object({
+      saleId: uuid,
+      paid: moneyText,
+      paymentMethod: z.enum(['CASH', 'BANKAK', 'FAWRY', 'TRANSFER']),
+    })))
+    body: { saleId: string; paid: string; paymentMethod: string },
+  ) {
+    return this.ops.receiveSale(this.tenant(request), this.branch(request), this.actor(request), this.header(request), body);
   }
 
   @Get('purchasing')
@@ -597,15 +617,37 @@ export class OpsController {
           value: z.string().trim().regex(/^-?\d+(\.\d{1,2})?$/).optional().default('0.00'),
           nameAr: z.string().trim().min(1).max(200),
           nameEn: z.string().trim().min(1).max(200),
+          effectiveFrom: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
         }),
       ),
     )
-    body: { priceListId: string; adjust: 'SAME' | 'PCT' | 'AMOUNT'; value: string; nameAr: string; nameEn: string },
+    body: { priceListId: string; adjust: 'SAME' | 'PCT' | 'AMOUNT'; value: string; nameAr: string; nameEn: string; effectiveFrom?: string },
   ) {
     return this.ops.copyPriceList(this.tenant(request), this.actor(request), body.priceListId, body.adjust, body.value, {
       nameAr: body.nameAr,
       nameEn: body.nameEn,
-    });
+    }, body.effectiveFrom);
+  }
+
+  @Post('prices/link')
+  linkPrice(
+    @Req() request: AuthenticatedRequest,
+    @Body(new ZodValidationPipe(z.object({ priceListId: uuid, branchId: uuid })))
+    body: { priceListId: string; branchId: string },
+  ) {
+    return this.ops.linkPriceBranch(this.tenant(request), this.actor(request), body);
+  }
+
+  @Post('prices/effective')
+  setPriceDate(
+    @Req() request: AuthenticatedRequest,
+    @Body(new ZodValidationPipe(z.object({
+      priceListId: uuid,
+      effectiveFrom: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    })))
+    body: { priceListId: string; effectiveFrom: string },
+  ) {
+    return this.ops.updatePriceDate(this.tenant(request), this.actor(request), body);
   }
 
   @Post('prices/bulk')
@@ -655,12 +697,12 @@ export class OpsController {
     @Req() request: AuthenticatedRequest,
     @Body(new ZodValidationPipe(z.object({
       rate: moneyText,
-      action: z.enum(['preview', 'draft', 'submit', 'reject', 'approve']),
+      action: z.enum(['preview', 'draft', 'submit', 'reject', 'approve', 'rate']),
       proposalId: uuid.optional(),
       reason: z.string().trim().max(400).optional().default(''),
       effectiveOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
     })))
-    body: { rate: string; action: 'preview' | 'draft' | 'submit' | 'reject' | 'approve'; proposalId?: string; reason?: string; effectiveOn?: string },
+    body: { rate: string; action: 'preview' | 'draft' | 'submit' | 'reject' | 'approve' | 'rate'; proposalId?: string; reason?: string; effectiveOn?: string },
   ) {
     return this.ops.proposeUsdRate(this.tenant(request), this.actor(request), body);
   }

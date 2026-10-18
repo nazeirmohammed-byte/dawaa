@@ -278,7 +278,7 @@ export class AlertsService {
           tx.product.findMany({ where: { tenantId, isDeleted: false } }),
           tx.stockLot.findMany({ where: { tenantId, ...branch } }),
           tx.stockMovement.findMany({ where: { tenantId, ...branch } }),
-          tx.sale.findMany({ where: { tenantId, ...branch, soldAt: { gte: since } }, include: { lines: true } }),
+          tx.sale.findMany({ where: { tenantId, status: 'POSTED', ...branch, soldAt: { gte: since } }, include: { lines: true } }),
           tx.purchaseOrder.findMany({
             where: { tenantId, ...branch, OR: [{ status: { in: ['DRAFT', 'ORDERED', 'PARTIAL'] } }, { orderedAt: { gte: since } }] },
             include: { supplier: true, lines: true },

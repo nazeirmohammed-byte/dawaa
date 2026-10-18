@@ -1,6 +1,6 @@
 import { FormEvent, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { api } from './api';
+import { api, formatUserError } from './api';
 import { useUi } from './ui';
 
 export function LibraryRequest({ query }: { query: string }) {
@@ -46,7 +46,7 @@ export function LibraryRequest({ query }: { query: string }) {
       setSent(true);
       ui.push({ tone: 'ok', title: t('saved'), body: t('askItem') });
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : t('empty'));
+      setError(formatUserError(caught, t('apiError')));
     }
   }
 

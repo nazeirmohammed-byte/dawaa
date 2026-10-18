@@ -1,7 +1,7 @@
 import { cloneElement, FormEvent, isValidElement, useEffect, useState, type ReactElement, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useNavigate } from 'react-router-dom';
-import { api } from './api';
+import { api, formatUserError } from './api';
 import { Logo, useUi } from './ui';
 
 const DEMO_TENANT_CODE = 'DW0001';
@@ -63,7 +63,7 @@ export function LoginPage() {
         localStorage.setItem('dawaa.impersonating', '1');
         navigate('/app');
       })
-      .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : t('empty')))
+      .catch((caught: unknown) => setError(formatUserError(caught, t('apiError'))))
       .finally(() => setBusy(false));
   }, [navigate, t]);
 
@@ -101,7 +101,7 @@ export function LoginPage() {
       ui.push({ tone: 'ok', title: t('welcomeTitle'), body: t('welcomeBody') });
       navigate(ui.touch && OPEN_SCREENS.some(([path]) => path === openAt) ? openAt : '/app');
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : t('empty'));
+      setError(formatUserError(caught, t('apiError')));
     } finally {
       setBusy(false);
     }
@@ -130,7 +130,7 @@ export function LoginPage() {
       });
       navigate('/admin/dashboard');
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : t('empty'));
+      setError(formatUserError(caught, t('apiError')));
     } finally {
       setBusy(false);
     }

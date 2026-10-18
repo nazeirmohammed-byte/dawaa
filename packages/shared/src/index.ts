@@ -18,6 +18,7 @@ export {
   TENANT_TYPES,
   assertFeature,
   errorMessage,
+  formatErrorDetails,
   loginSchema,
   prefersArabic,
 } from './domain';

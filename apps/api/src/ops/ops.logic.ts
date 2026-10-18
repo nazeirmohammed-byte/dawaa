@@ -52,6 +52,16 @@ export function piecesInContainer(pack: ItemPack): number {
   return saleChoices(pack).find((choice) => choice.unit === pack.outer)?.pieces ?? 1;
 }
 
+/** Pieces represented by one ordered unit (box, strip, bottle, or piece). */
+export function orderUnitPieces(pack: ItemPack | null, unitCode: string): number {
+  if (!pack || unitCode === 'PIECE') return 1;
+  return saleChoices(pack).find((choice) => choice.unit === unitCode)?.pieces ?? 1;
+}
+
+export function qtyToStockPieces(qty: number, pack: ItemPack | null, unitCode: string): number {
+  return qty * orderUnitPieces(pack, unitCode);
+}
+
 /** The list price is the container. A strip is that price divided by the strips in the box. */
 export function containerUnitPrice(containerPrice: string, divide: number): string {
   if (divide <= 1) return containerPrice;
@@ -671,14 +681,50 @@ export function renewAmount(amount: string, adjust: RenewAdjust, value: string):
   return next;
 }
 
-/**
- * A new list starts after the list already used in sales.
- * A copy may keep that same date, and then it replaces the current list.
- */
-export function priceListDateGate(input: { nextOn: string; currentOn: string | null; copied: boolean }): 'ok' | 'PRICE_DATE' {
-  if (!input.currentOn || input.nextOn > input.currentOn) return 'ok';
-  if (input.nextOn === input.currentOn && input.copied) return 'ok';
-  return 'PRICE_DATE';
+export type SellingListRow = {
+  id: string;
+  scope: string;
+  status: string;
+  isActive: boolean;
+  activatedAt: string | null;
+  createdAt: string;
+};
+
+/** One selling list per branch context: branch override, else newest pharmacy-wide active list. */
+export function resolveSellingPriceListId(input: {
+  branchId: string | null;
+  lists: SellingListRow[];
+  branchLinks: { branchId: string; priceListId: string; isActive: boolean; activatedAt: string | null }[];
+}): string | null {
+  const byId = new Map(input.lists.map((list) => [list.id, list]));
+  if (input.branchId) {
+    const link = input.branchLinks
+      .filter((row) => row.branchId === input.branchId && row.isActive)
+      .sort((left, right) => (right.activatedAt ?? '').localeCompare(left.activatedAt ?? ''))[0];
+    if (link) {
+      const list = byId.get(link.priceListId);
+      if (list?.status === 'ACTIVE') return link.priceListId;
+    }
+  }
+  const shared = input.lists
+    .filter((list) => list.scope === 'PHARMACY' && list.status === 'ACTIVE' && list.isActive)
+    .sort((left, right) => (right.activatedAt ?? right.createdAt).localeCompare(left.activatedAt ?? left.createdAt))[0];
+  return shared?.id ?? null;
+}
+
+/** Archive ids when more than one pharmacy-wide list stayed active (data repair helper). */
+export function duplicateActivePharmacyListIds(lists: SellingListRow[]): string[] {
+  const actives = lists.filter((list) => list.scope === 'PHARMACY' && list.status === 'ACTIVE' && list.isActive);
+  if (actives.length <= 1) return [];
+  const sorted = [...actives].sort((left, right) =>
+    (right.activatedAt ?? right.createdAt).localeCompare(left.activatedAt ?? left.createdAt),
+  );
+  return sorted.slice(1).map((list) => list.id);
+}
+
+/** Today or any later day is allowed. A date before today is a back date. */
+export function priceListDateGate(input: { nextOn: string; today: string }): 'ok' | 'PRICE_DATE' {
+  return input.nextOn < input.today ? 'PRICE_DATE' : 'ok';
 }
 
 /** Which price-list buttons the server allows. Editing stays on an unused draft. */

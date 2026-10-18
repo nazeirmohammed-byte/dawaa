@@ -1,4 +1,4 @@
-import { errorMessage } from '@dawaa/shared';
+import { formatErrorDetails } from '@dawaa/shared';
 
 export type ErrorBody = {
   code: string;
@@ -10,7 +10,7 @@ export type ErrorBody = {
 export function toErrorBody(code: string, acceptLanguage: string | undefined, details: unknown = null): ErrorBody {
   return {
     code,
-    message: errorMessage(code, acceptLanguage),
+    message: formatErrorDetails(code, acceptLanguage, details),
     messageKey: `errors.${code}`,
     details,
   };

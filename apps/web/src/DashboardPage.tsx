@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
-import { api, type BoardCard, type Profile } from './api';
+import { api, formatUserError, type BoardCard, type Profile } from './api';
 import { HelpTip } from '../../admin/src/hint';
 import { HomeDash } from './HomeDash';
-import { useUi } from './ui';
+import { NavIcon } from './components/nav-icons';
+import { Logo, useUi } from './ui';
 
 export function Shell({ children }: { children: React.ReactNode }) {
   const { t } = useTranslation();
@@ -15,6 +16,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const [query, setQuery] = useState('');
   const [online, setOnline] = useState(true);
   const [alertCount, setAlertCount] = useState(0);
+  const [deskCount, setDeskCount] = useState(0);
   const [bellOpen, setBellOpen] = useState(false);
   const [bellItems, setBellItems] = useState<{ id: string; severity: string; titleAr: string; titleEn: string }[]>([]);
   const [scopeKey, setScopeKey] = useState(localStorage.getItem('dawaa.branch') ?? '');
@@ -32,7 +34,16 @@ export function Shell({ children }: { children: React.ReactNode }) {
         .catch(() => setAlertCount(0));
     };
     loadBell();
-    const bellTimer = window.setInterval(loadBell, 60000);
+    const loadDesk = () => {
+      api<{ sales: { id: string }[] }>('/api/v1/ops/sales/waiting')
+        .then((body) => setDeskCount(body.sales.length))
+        .catch(() => setDeskCount(0));
+    };
+    loadDesk();
+    const bellTimer = window.setInterval(() => {
+      loadBell();
+      loadDesk();
+    }, 60000);
     const timer = window.setInterval(() => {
       api<{ status: string }>('/api/v1/health')
         .then((health) => setOnline(health.status !== 'error'))
@@ -172,62 +183,87 @@ export function Shell({ children }: { children: React.ReactNode }) {
     },
   ] as { id: string; label: string; items: NavItem[] }[]).map((group) => ({ ...group, items: group.items.filter((item) => allow(item[3])) })).filter((group) => group.items.length > 0);
   const herePath = `${location.pathname}${location.search}`;
-  const currentGroup =
-    groups.find((group) => group.items.some(([to, end]) => (end ? location.pathname === to : herePath === to)))?.id ?? 'sell';
-  const [openGroup, setOpenGroup] = useState<string>(currentGroup);
   const [accountOpen, setAccountOpen] = useState(false);
+  const searchRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
-    setOpenGroup(currentGroup);
-  }, [currentGroup]);
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        searchRef.current?.focus();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   return (
     <div className="app">
       <aside className="side">
-        <Link to="/app" className="logo side-logo">
-          <span className="logo-mark plus-mark">+</span>
-          <span>
-            <strong>{name || t('product')}</strong>
-            <span className="tagline">{t('tagline')}</span>
-          </span>
-        </Link>
-        <nav className="modnav">
-          <Link to="/app" title={t('control')} aria-current={location.pathname === '/app' ? 'page' : undefined} className={location.pathname === '/app' ? 'active' : undefined}>
+        <div className="side-head">
+          <Link to="/app" className="side-brand-main" aria-label={t('control')}>
+            <Logo light />
+          </Link>
+          <div className="side-tenant" title={name || t('product')}>
+            <span className="side-tenant-avatar" aria-hidden="true">
+              {(name || t('product')).trim().charAt(0) || 'د'}
+            </span>
+            <span className="side-tenant-text">
+              <small>{t('sideWorkspace')}</small>
+              <strong>{name || t('product')}</strong>
+            </span>
+            <span className="side-tenant-dot" aria-hidden="true" />
+          </div>
+        </div>
+        <nav className="modnav" aria-label={t('control')}>
+          <Link
+            to="/app"
+            title={t('control')}
+            aria-current={location.pathname === '/app' ? 'page' : undefined}
+            className={`nav-item${location.pathname === '/app' ? ' active' : ''}`}
+          >
+            <span className="nav-icon"><NavIcon name="control" /></span>
             <span className="nav-label">{t('control')}</span>
           </Link>
           {groups.map((group) => (
-            <div className={`nav-group ${group.id}`} key={group.id}>
-              <button type="button" aria-expanded={openGroup === group.id} onClick={() => setOpenGroup(openGroup === group.id ? '' : group.id)}>
-                <span className="nav-swatch" aria-hidden="true" />
-                <span className="nav-label">{t(group.label)}</span>
-                <span className={`nav-caret${openGroup === group.id ? ' open' : ''}`} aria-hidden="true" />
-              </button>
-              {openGroup === group.id
-                ? group.items.map(([to, end, key]) => {
-                    const here = end ? location.pathname === to : herePath === to;
-                    return (
-                      <Link
-                        key={`${to}-${key}`}
-                        to={to}
-                        title={t(key)}
-                        aria-label={ui.side === 'icons' ? t(key) : undefined}
-                        aria-current={here ? 'page' : undefined}
-                        className={here ? 'active' : undefined}
-                      >
-                        <span className="nav-label">{t(key)}</span>
-                      </Link>
-                    );
-                  })
-                : null}
-            </div>
+            <section className="nav-section" key={group.id} aria-label={t(group.label)}>
+              <p className="nav-section-title">
+                <NavIcon name={group.label} size={14} />
+                <span>{t(group.label)}</span>
+              </p>
+              <div className="nav-section-items">
+                {group.items.map(([to, end, key]) => {
+                  const here = end ? location.pathname === to : herePath === to;
+                  const badge = key === 'alerts' ? alertCount : key === 'quickPos' ? deskCount : 0;
+                  return (
+                    <Link
+                      key={`${to}-${key}`}
+                      to={to}
+                      title={t(key)}
+                      aria-current={here ? 'page' : undefined}
+                      className={`nav-item${here ? ' active' : ''}`}
+                    >
+                      <span className="nav-icon"><NavIcon name={key} /></span>
+                      <span className="nav-label">{t(key)}</span>
+                      {badge > 0 ? <span className="nav-badge">{badge}</span> : null}
+                    </Link>
+                  );
+                })}
+              </div>
+            </section>
           ))}
         </nav>
         <div className="side-foot">
-          <Link to="/app/settings">{t('support')}</Link>
-          <button type="button" onClick={logout}>
-            {t('logout')}
+          <button type="button" className="side-foot-btn" onClick={ui.toggleSideCompact} title={ui.sideCompact ? t('sideExpand') : t('sideCollapse')}>
+            <span className="nav-icon"><NavIcon name={ui.sideCompact ? 'expand' : 'collapse'} /></span>
+            <span className="nav-label">{ui.sideCompact ? t('sideExpand') : t('sideCollapse')}</span>
           </button>
-          <button type="button" className="side-toggle" onClick={ui.toggleSide}>
-            {ui.side === 'icons' ? t('expand') : t('collapse')}
+          <Link className="side-foot-btn" to="/app/settings" title={t('support')}>
+            <span className="nav-icon"><NavIcon name="support" /></span>
+            <span className="nav-label">{t('support')}</span>
+          </Link>
+          <button type="button" className="side-foot-btn side-logout" onClick={logout} title={t('logout')}>
+            <span className="nav-icon"><NavIcon name="logout" /></span>
+            <span className="nav-label">{t('logout')}</span>
           </button>
         </div>
       </aside>
@@ -237,6 +273,11 @@ export function Shell({ children }: { children: React.ReactNode }) {
       ) : null}
       <header className="topbar">
         <div className="top-title">
+          <nav className="ds-breadcrumbs" aria-label="Breadcrumb">
+            <Link to="/app">{t('control')}</Link>
+            <span aria-hidden="true">/</span>
+            <span aria-current="page">{pageTitle}</span>
+          </nav>
           <h1>
             {pageTitle}
             {pageHint ? <HelpTip text={pageHint} /> : null}
@@ -260,7 +301,8 @@ export function Shell({ children }: { children: React.ReactNode }) {
             navigate(`/app/inventory?q=${encodeURIComponent(query)}`);
           }}
         >
-          <input value={query} placeholder={t('searchPh')} onChange={(event) => setQuery(event.target.value)} />
+          <input ref={searchRef} value={query} placeholder={t('searchPh')} onChange={(event) => setQuery(event.target.value)} />
+          <kbd className="search-kbd" aria-hidden="true">Ctrl K</kbd>
         </form>
         <div className="top-actions">
           <span className="tool-btn" title={t('country')}>
@@ -292,6 +334,29 @@ export function Shell({ children }: { children: React.ReactNode }) {
             </svg>
             <span>{ui.touch ? t('touchOff') : t('touchOn')}</span>
           </button>
+          <button
+            type="button"
+            className={ui.theme === 'dark' ? 'tool-btn on' : 'tool-btn'}
+            title={ui.theme === 'dark' ? t('lightMode') : t('darkMode')}
+            onClick={() => {
+              const next = ui.theme === 'dark' ? 'light' : 'dark';
+              ui.toggleTheme();
+              ui.push({
+                tone: 'info',
+                title: next === 'dark' ? t('darkMode') : t('lightMode'),
+                body: next === 'dark' ? t('darkMode') : t('lightMode'),
+              });
+            }}
+          >
+            <svg className="tool-ico" viewBox="0 0 24 24" aria-hidden="true">
+              {ui.theme === 'dark' ? (
+                <path d="M12 3a1 1 0 0 1 1 1v1.2a1 1 0 1 1-2 0V4a1 1 0 0 1 1-1zm0 14.8a4.8 4.8 0 1 0 0-9.6 4.8 4.8 0 0 0 0 9.6zM4.2 12a1 1 0 0 1-1-1 1 1 0 0 1 1-1h1.2a1 1 0 1 1 0 2H4.2zm13.6 0a1 1 0 0 1-1-1 1 1 0 0 1 1-1H19a1 1 0 1 1 0 2h-1.2zM6.3 6.3a1 1 0 0 1 1.4 0l.85.85a1 1 0 1 1-1.4 1.42l-.86-.86a1 1 0 0 1 0-1.41zm10.15 10.15a1 1 0 0 1 1.4 0l.85.85a1 1 0 0 1-1.4 1.42l-.86-.86a1 1 0 0 1 0-1.41zM12 18.8a1 1 0 0 1 1 1V21a1 1 0 1 1-2 0v-1.2a1 1 0 0 1 1-1zm-5.7-2.35a1 1 0 0 1 1.4 0 1 1 0 0 1 0 1.42l-.85.85a1 1 0 1 1-1.42-1.42l.87-.85zm10.15-10.15a1 1 0 0 1 1.4 0l.85.85a1 1 0 0 1-1.4 1.42l-.86-.86a1 1 0 0 1 0-1.41z" fill="currentColor" />
+              ) : (
+                <path d="M14.5 13.2a5.5 5.5 0 0 1-6.7-6.7 5.5 5.5 0 1 0 6.7 6.7z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+              )}
+            </svg>
+            <span>{ui.theme === 'dark' ? t('lightMode') : t('darkMode')}</span>
+          </button>
           <button type="button" className="tool-btn" onClick={ui.toggleLanguage} title={t('language')}>
             <svg className="tool-ico" viewBox="0 0 24 24" aria-hidden="true">
               <circle cx="12" cy="12" r="8.25" fill="none" stroke="currentColor" strokeWidth="1.8" />
@@ -317,6 +382,11 @@ export function Shell({ children }: { children: React.ReactNode }) {
             <span>{t('alerts')}</span>
             {alertCount > 0 ? <span className="count">{alertCount}</span> : null}
           </button>
+          {deskCount > 0 ? (
+            <Link className="tool-btn" to="/app/pos">
+              <span>{t('cashierWaiting', { count: deskCount })}</span>
+            </Link>
+          ) : null}
           {bellOpen ? (
             <div className="user-pop bell-pop">
               {bellItems.length === 0 ? <span>{t('alertEmpty')}</span> : bellItems.slice(0, 6).map((item) => (
@@ -426,7 +496,7 @@ export function AccountPage() {
             body: JSON.stringify({ currentPassword, nextPassword }),
           })
             .then(() => setMessage(t('save')))
-            .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : t('empty')));
+            .catch((caught: unknown) => setError(formatUserError(caught, t('apiError'))));
         }}
       >
         <h3>{t('changePassword')}</h3>

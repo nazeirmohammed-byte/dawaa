@@ -8,7 +8,7 @@ import { DomainError } from '../http/domain-error';
 import { PrismaService } from '../prisma/prisma.service';
 import { ensureTenantReference, findCommercialDuplicate, searchPublishedLibrary, type LibraryHit } from '../catalog/global-library';
 import { plainMedicineName } from './medicine-name';
-import { allocateFefo, allocateReceiptCosts, assertJournalBalances, assertReceiptLine, balanceDelta, buildHome, canStockReceipt, claimReceiptQty, claimStockQty, containerUnitPrice, inventoryDocNo, isSellableLot, khartoumDate, khartoumDayStart, manufacturerBatch, nextPrice, normalizePlace, orderStockState, parseCsv, parseItemPack, pieceUnitCost, piecesInContainer, placeCompatible, priceChangePct, priceListDateGate, priceListWorkflow, renewAmount, saleChoices, STOCK_PLACES, storageNeed, suggestPlace, summarizeStocking, usdSellingPrice, type ItemPack, type OrderBucket, type PriceOp, type RenewAdjust, type SaleUnit } from './ops.logic';
+import { allocateFefo, allocateReceiptCosts, assertJournalBalances, assertReceiptLine, balanceDelta, buildHome, canStockReceipt, claimReceiptQty, claimStockQty, containerUnitPrice, duplicateActivePharmacyListIds, inventoryDocNo, isSellableLot, khartoumDate, khartoumDayStart, manufacturerBatch, nextPrice, normalizePlace, orderStockState, parseCsv, parseItemPack, pieceUnitCost, piecesInContainer, placeCompatible, priceChangePct, priceListDateGate, priceListWorkflow, qtyToStockPieces, renewAmount, resolveSellingPriceListId, saleChoices, STOCK_PLACES, storageNeed, suggestPlace, summarizeStocking, usdSellingPrice, type ItemPack, type OrderBucket, type PriceOp, type RenewAdjust, type SaleUnit } from './ops.logic';
 
 type Tx = Parameters<Parameters<PrismaClient['$transaction']>[0]>[0];
 
@@ -101,6 +101,7 @@ export type SaleInput = {
   discount: string;
   paid: string;
   paymentMethod: string;
+  hold?: boolean;
   lines: { productId: string; qty: number; unit?: SaleUnit }[];
 };
 
@@ -129,6 +130,7 @@ export type PurchaseInput = {
     unitCost?: string;
     sellPrice?: string;
     pack?: ItemPack;
+    unitCode?: string;
   }[];
 };
 
@@ -199,19 +201,45 @@ export class OpsService {
   inventory(tenantId: string, userId: string, jwtBranch: string | null, header: string | null) {
     return this.prisma.withTenant(tenantId, async (tx) => {
       const scope = await this.access(tx, tenantId, userId, jwtBranch, header, false);
-      const [categories, products, lots] = await Promise.all([
+      const branch = scope.readBranchId ? { branchId: scope.readBranchId } : {};
+      const [categories, products, lots, receiptLines] = await Promise.all([
         tx.category.findMany({ where: { tenantId, isDeleted: false }, orderBy: { nameAr: 'asc' } }),
         tx.product.findMany({ where: { tenantId, isDeleted: false }, orderBy: { nameAr: 'asc' } }),
-        tx.stockLot.findMany({ where: scope.readBranchId ? { tenantId, branchId: scope.readBranchId } : { tenantId } }),
+        tx.stockLot.findMany({ where: { tenantId, ...branch } }),
+        tx.goodsReceiptLine.findMany({
+          where: {
+            tenantId,
+            condition: 'AVAILABLE',
+            receipt: { tenantId, status: 'POSTED', source: 'PROCUREMENT', ...branch },
+          },
+          select: { productId: true, qty: true, bonusQty: true, postedQty: true },
+        }),
       ]);
+      const today = khartoumDate();
+      const remainingByProduct = new Map<string, number>();
+      for (const line of receiptLines) {
+        const left = Math.max(0, line.qty + line.bonusQty - line.postedQty);
+        if (left === 0) continue;
+        remainingByProduct.set(line.productId, (remainingByProduct.get(line.productId) ?? 0) + left);
+      }
+      const expiredByProduct = new Map<string, number>();
+      for (const lot of lots) {
+        if (lot.qtyBase <= 0 || lot.condition !== 'AVAILABLE' || khartoumDate(lot.expiry) >= today) continue;
+        expiredByProduct.set(lot.productId, (expiredByProduct.get(lot.productId) ?? 0) + lot.qtyBase);
+      }
+      const priced = await this.withPrices(
+        tx,
+        tenantId,
+        scope.readBranchId,
+        (await this.paintProducts(tx, products)).map((product) => this.viewProduct(product, lots)),
+      );
       return {
         categories: categories.map((row) => ({ id: row.id, nameAr: row.nameAr, nameEn: row.nameEn })),
-        products: await this.withPrices(
-          tx,
-          tenantId,
-          scope.readBranchId,
-          (await this.paintProducts(tx, products)).map((product) => this.viewProduct(product, lots)),
-        ),
+        products: priced.map((product) => ({
+          ...product,
+          remaining: remainingByProduct.get(product.id) ?? 0,
+          expiredQty: expiredByProduct.get(product.id) ?? 0,
+        })),
         stocking: await this.stockingSummary(tx, tenantId, scope.readBranchId),
         scope: { management: scope.management, all: scope.readBranchId === null },
       };
@@ -338,7 +366,7 @@ export class OpsService {
       const saleWhere = scope.readBranchId ? { tenantId, branchId: scope.readBranchId } : { tenantId };
       const lotWhere = scope.readBranchId ? { tenantId, branchId: scope.readBranchId } : { tenantId };
       const [sales, products, customers, lots] = await Promise.all([
-        tx.sale.findMany({ where: saleWhere, orderBy: { soldAt: 'desc' }, take: 30, include: { lines: true } }),
+        tx.sale.findMany({ where: { ...saleWhere, status: 'POSTED' }, orderBy: { soldAt: 'desc' }, take: 30, include: { lines: true } }),
         tx.product.findMany({ where: { tenantId, isDeleted: false }, orderBy: { nameAr: 'asc' } }),
         tx.customer.findMany({ where: { tenantId, isDeleted: false }, orderBy: { nameAr: 'asc' } }),
         tx.stockLot.findMany({ where: lotWhere }),
@@ -384,7 +412,8 @@ export class OpsService {
         if (products.length !== ids.length) throw new DomainError('NOT_FOUND', 404);
         const byId = new Map(products.map((product) => [product.id, product]));
         const priceMap = await this.priceQuote(tx, tenantId, branchId, ids);
-        const listed = await tx.priceList.findFirst({ where: { tenantId, isActive: true, status: 'ACTIVE' }, select: { id: true } });
+        const sellingListId = [...priceMap.values()][0]?.listId ?? null;
+        const listed = sellingListId ? { id: sellingListId } : null;
         const packs = await this.itemPacks(tx, tenantId, ids);
         let subtotal = '0.00';
         let cost = '0.00';
@@ -421,6 +450,58 @@ export class OpsService {
         });
         if (cmpMoney(discount, subtotal) > 0) throw new DomainError('VALIDATION_ERROR', 400);
         const total = subMoney(subtotal, discount);
+        if (input.hold) {
+          const today = khartoumDate();
+          for (const line of priced) {
+            const lots = await tx.stockLot.findMany({ where: { tenantId, branchId, productId: line.product.id } });
+            const onHand = lots
+              .filter((lot) => isSellableLot({ qtyBase: lot.qtyBase, expiry: lot.expiry.toISOString(), condition: lot.condition }, today))
+              .reduce((sum, lot) => sum + lot.qtyBase, 0);
+            if (onHand < line.stockQty) throw new DomainError('STOCK_SHORT', 409);
+          }
+          const saleId = randomUUID();
+          const docNo = `S-${saleId.slice(0, 8).toUpperCase()}`;
+          await tx.sale.create({
+            data: {
+              id: saleId,
+              tenantId,
+              branchId,
+              docNo,
+              customerName: input.customerName,
+              cashierName: cashier?.displayName ?? '',
+              soldAt: new Date(),
+              subtotal,
+              discount,
+              total,
+              paid: '0.00',
+              changeDue: '0.00',
+              paymentMethod: 'PENDING',
+              status: 'AWAITING_CASH',
+              createdBy: actorId,
+            },
+          });
+          for (const line of priced) {
+            await tx.saleLine.create({
+              data: {
+                tenantId,
+                saleId,
+                productId: line.product.id,
+                nameAr: line.nameAr,
+                nameEn: line.nameEn,
+                qty: line.qty,
+                unitPrice: line.unitPrice,
+                lineTotal: line.lineTotal,
+                costTotal: line.costTotal,
+                unitCost: line.unitCost,
+                discountAmount: '0.00',
+                priceListId: line.quote?.listId ?? null,
+                priceListVersionNo: line.quote?.version ?? null,
+                createdBy: actorId,
+              },
+            });
+          }
+          return { id: saleId, docNo, total, changeDue: '0.00', status: 'AWAITING_CASH' };
+        }
         if (cmpMoney(paid, total) < 0) throw new DomainError('VALIDATION_ERROR', 400);
         const saleId = randomUUID();
         const docNo = `S-${saleId.slice(0, 8).toUpperCase()}`;
@@ -472,7 +553,95 @@ export class OpsService {
           { code: '5000', debit: cost, credit: '0.00' },
           { code: '1200', debit: '0.00', credit: cost },
         ]);
-        return { id: saleId, docNo, total, changeDue: subMoney(paid, total) };
+        return { id: saleId, docNo, total, changeDue: subMoney(paid, total), status: 'POSTED' };
+      });
+    } catch (error) {
+      this.rethrow(error);
+    }
+  }
+
+  waitingSales(tenantId: string, userId: string, jwtBranch: string | null, header: string | null) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const scope = await this.access(tx, tenantId, userId, jwtBranch, header, false);
+      const where = scope.readBranchId
+        ? { tenantId, branchId: scope.readBranchId, status: 'AWAITING_CASH' }
+        : { tenantId, status: 'AWAITING_CASH' };
+      const sales = await tx.sale.findMany({ where, orderBy: { soldAt: 'asc' }, include: { lines: true }, take: 20 });
+      return {
+        sales: sales.map((sale) => ({
+          id: sale.id,
+          docNo: sale.docNo,
+          customerName: sale.customerName,
+          cashierName: sale.cashierName,
+          soldAt: sale.soldAt.toISOString(),
+          total: cash(sale.total),
+          lines: sale.lines.map((line) => ({
+            nameAr: line.nameAr,
+            nameEn: line.nameEn,
+            qty: line.qty,
+            lineTotal: cash(line.lineTotal),
+          })),
+        })),
+      };
+    });
+  }
+
+  async receiveSale(
+    tenantId: string,
+    branchHint: string | null,
+    actorId: string,
+    header: string | null,
+    input: { saleId: string; paid: string; paymentMethod: string },
+  ) {
+    try {
+      const paid = money(input.paid);
+      return await this.prisma.withTenant(tenantId, async (tx) => {
+        const branchId = (await this.access(tx, tenantId, actorId, branchHint, header, true)).writeBranchId;
+        const sale = await tx.sale.findFirst({ where: { id: input.saleId, tenantId }, include: { lines: true } });
+        if (!sale || sale.status !== 'AWAITING_CASH' || sale.branchId !== branchId) throw new DomainError('NOT_FOUND', 404);
+        const total = cash(sale.total);
+        if (cmpMoney(paid, total) < 0) throw new DomainError('VALIDATION_ERROR', 400);
+        const cashier = await tx.user.findFirst({ where: { id: actorId, tenantId } });
+        const packs = await this.itemPacks(tx, tenantId, sale.lines.map((line) => line.productId));
+        let cost = '0.00';
+        for (const line of sale.lines) {
+          const pack = packs.get(line.productId) ?? null;
+          const unit = (['BOX', 'STRIP', 'BOTTLE', 'PIECE'] as const).find((key) => line.nameEn.endsWith(` · ${UNIT_EN[key]}`));
+          const choice = unit && pack ? saleChoices(pack).find((item) => item.unit === unit) : undefined;
+          const stockQty = line.qty * (choice?.pieces ?? 1);
+          await this.takeStock(tx, tenantId, branchId, actorId, line.productId, stockQty, 'SALE', sale.id, sale.docNo);
+          cost = addMoney(cost, cash(line.costTotal));
+        }
+        await tx.sale.update({
+          where: { id: sale.id },
+          data: {
+            status: 'POSTED',
+            paid,
+            changeDue: subMoney(paid, total),
+            paymentMethod: input.paymentMethod,
+            cashierName: cashier?.displayName ?? sale.cashierName,
+            soldAt: new Date(),
+            updatedBy: actorId,
+          },
+        });
+        await this.postJournal(tx, tenantId, actorId, `بيع ${sale.docNo}`, `Sale ${sale.docNo}`, [
+          { code: '1000', debit: total, credit: '0.00' },
+          { code: '4000', debit: '0.00', credit: total },
+          { code: '5000', debit: cost, credit: '0.00' },
+          { code: '1200', debit: '0.00', credit: cost },
+        ]);
+        return {
+          id: sale.id,
+          docNo: sale.docNo,
+          customerName: sale.customerName,
+          cashierName: cashier?.displayName ?? sale.cashierName,
+          total,
+          paid,
+          changeDue: subMoney(paid, total),
+          paymentMethod: input.paymentMethod,
+          status: 'POSTED',
+          lines: sale.lines.map((line) => ({ nameAr: line.nameAr, nameEn: line.nameEn, qty: line.qty, lineTotal: cash(line.lineTotal) })),
+        };
       });
     } catch (error) {
       this.rethrow(error);
@@ -513,6 +682,7 @@ export class OpsService {
           })),
         }).then(() => tx.supplier.findMany({ where: { tenantId, isDeleted: false }, orderBy: { nameAr: 'asc' } }));
       const namedProducts = await this.paintProducts(tx, products);
+      const packByProduct = await this.itemPacks(tx, tenantId, products.map((row) => row.id));
       const namedLines = new Map(
         (await this.paintProducts(tx, orders.flatMap((order) => order.lines.map((line) => line.product)))).map((product) => [product.id, product]),
       );
@@ -564,6 +734,8 @@ export class OpsService {
               id: line.id,
               qty: line.qty,
               receivedQty: line.receivedQty,
+              unitCode: line.unitCode,
+              pack: packByProduct.get(line.productId) ?? null,
               unitCost: cash(line.unitCost),
               lineTotal: cash(line.lineTotal),
               productId: line.productId,
@@ -629,6 +801,7 @@ export class OpsService {
         });
         for (const line of lines) {
           if (line.pack) await this.rememberPack(tx, tenantId, actorId, line.productId, line.pack);
+          const unitCode = line.unitCode ?? line.pack?.outer ?? 'PIECE';
           await tx.purchaseLine.create({
             data: {
               tenantId,
@@ -636,6 +809,7 @@ export class OpsService {
               productId: line.productId,
               qty: line.qty,
               receivedQty: 0,
+              unitCode,
               unitCost: line.unitCost,
               lineTotal: line.lineTotal,
               createdBy: actorId,
@@ -1353,7 +1527,7 @@ export class OpsService {
 
   async catalog(tenantId: string, query: string | null) {
     const needle = (query ?? '').trim();
-    const found = await searchPublishedLibrary(this.prisma.client, needle, 1);
+    const found = await searchPublishedLibrary(this.prisma.client, needle, 1, 48);
     const rows: LibraryHit[] = [...found.rows];
     if (needle && rows.length < 8) {
       const legacy = await this.prisma.client.standardMedicine.findMany({
@@ -1454,25 +1628,38 @@ export class OpsService {
       ]);
       const usedIds = new Set(usedRows.map((row) => row.priceListId).filter((id): id is string => id !== null));
       const listById = new Map(lists.map((list) => [list.id, list]));
-      const shared = lists
-        .filter((list) => list.scope === 'PHARMACY' && list.isActive && list.status === 'ACTIVE')
-        .sort((left, right) => (right.activatedAt?.getTime() ?? 0) - (left.activatedAt?.getTime() ?? 0))[0] ?? null;
-      const branchActivation = scope.readBranchId
-        ? activations
-            .filter((row) => row.branchId === scope.readBranchId && row.isActive)
-            .sort((left, right) => {
-              const leftAt = listById.get(left.priceListId)?.activatedAt?.getTime() ?? 0;
-              const rightAt = listById.get(right.priceListId)?.activatedAt?.getTime() ?? 0;
-              return rightAt - leftAt;
-            })[0] ?? null
-        : null;
-      const selectedId = listId ?? branchActivation?.priceListId ?? shared?.id ?? lists[0]?.id ?? null;
+      await this.reconcileDuplicateActivePriceLists(tx, tenantId);
+      const listRows = lists.map((list) => ({
+        id: list.id,
+        scope: list.scope,
+        status: list.status,
+        isActive: list.isActive,
+        activatedAt: list.activatedAt?.toISOString() ?? null,
+        createdAt: list.createdAt.toISOString(),
+      }));
+      const branchLinks = activations.map((row) => ({
+        branchId: row.branchId,
+        priceListId: row.priceListId,
+        isActive: row.isActive,
+        activatedAt: listById.get(row.priceListId)?.activatedAt?.toISOString() ?? null,
+      }));
+      const sellingListIdResolved = resolveSellingPriceListId({
+        branchId: scope.readBranchId,
+        lists: listRows,
+        branchLinks,
+      });
+      const branchActivation =
+        scope.readBranchId && sellingListIdResolved
+          ? activations.find((row) => row.branchId === scope.readBranchId && row.isActive && row.priceListId === sellingListIdResolved) ??
+            null
+          : null;
+      const selectedId = listId ?? sellingListIdResolved ?? lists[0]?.id ?? null;
       const amounts =
         selectedId === null
           ? []
           : await tx.productPrice.findMany({ where: { tenantId, priceListId: selectedId } });
       const amountByProduct = new Map(amounts.map((row) => [row.productId, cash(row.amount)]));
-      const sellingListId = branchActivation?.priceListId ?? (shared && shared.status === 'ACTIVE' ? shared.id : null);
+      const sellingListId = sellingListIdResolved;
       const sellingRows =
         sellingListId === null || sellingListId === selectedId
           ? amounts
@@ -1490,11 +1677,12 @@ export class OpsService {
       });
       const qtyByProduct = new Map(stockLots.map((row) => [row.productId, row._sum.qtyBase ?? 0]));
         const named = await this.paintProducts(tx, products);
-        const sellingList = branchActivation ? listById.get(branchActivation.priceListId) ?? null : shared;
+        const sellingList = sellingListId ? listById.get(sellingListId) ?? null : null;
         return {
         using: branchActivation ? 'BRANCH' : 'PHARMACY',
         branchId: scope.readBranchId,
         sellingOn: sellingList ? khartoumDate(sellingList.effectiveFrom ?? sellingList.activatedAt ?? sellingList.createdAt) : null,
+        sellingId: sellingList?.id ?? null,
         selectedId,
         lists: lists.map((list) => {
           const link = activations.find((row) => row.priceListId === list.id);
@@ -1503,10 +1691,7 @@ export class OpsService {
             list.scope === 'PHARMACY'
               ? branchSelected
               : Boolean(branchSelected && link && link.branchId === scope.readBranchId);
-          const isSelling =
-            list.scope === 'PHARMACY'
-              ? list.status === 'ACTIVE' && list.isActive
-              : Boolean(link?.isActive && scope.readBranchId && link.branchId === scope.readBranchId);
+          const isSelling = list.id === sellingListId;
           const workflow = priceListWorkflow({
             status: list.status,
             usedOnSales: usedIds.has(list.id),
@@ -1529,6 +1714,7 @@ export class OpsService {
             locked: !workflow.allowedActions.includes('edit'),
             allowedActions: workflow.allowedActions,
             lockReason: workflow.lockReason,
+            copied: Boolean(list.sourcePriceListId),
             sourceNameAr: source?.nameAr ?? null,
             sourceNameEn: source?.nameEn ?? null,
             branchId: link?.branchId ?? null,
@@ -1574,6 +1760,7 @@ export class OpsService {
     return this.prisma.withTenant(tenantId, async (tx) => {
       const scope = await this.access(tx, tenantId, actorId, jwtBranch, header, input.scope === 'BRANCH');
       if (!scope.canViewAll) throw new DomainError('UNAUTHORIZED', 403);
+      this.guardPriceDate(input.effectiveFrom);
       const id = randomUUID();
       await tx.priceList.create({
         data: {
@@ -1603,6 +1790,41 @@ export class OpsService {
         await writeCodedPrices(tx, tenantId, actorId, id, items);
       }
       return { id, saved: items.length };
+    });
+  }
+
+  async linkPriceBranch(tenantId: string, actorId: string, input: { priceListId: string; branchId: string }) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const scope = await this.access(tx, tenantId, actorId, null, null, false);
+      if (!scope.canViewAll) throw new DomainError('UNAUTHORIZED', 403);
+      const list = await tx.priceList.findFirst({ where: { id: input.priceListId, tenantId } });
+      const branch = scope.branches.find((row) => row.id === input.branchId);
+      if (!list || list.status !== 'DRAFT' || !branch) throw new DomainError('VALIDATION_ERROR', 400);
+      await tx.priceList.update({
+        where: { id: list.id },
+        data: { scope: 'BRANCH', isActive: false, updatedBy: actorId },
+      });
+      const link = await tx.branchPriceActivation.findFirst({ where: { tenantId, priceListId: list.id } });
+      if (link) {
+        await tx.branchPriceActivation.update({
+          where: { id: link.id },
+          data: { branchId: branch.id, isActive: false },
+        });
+      } else {
+        await tx.branchPriceActivation.create({
+          data: { tenantId, branchId: branch.id, priceListId: list.id, isActive: false, createdBy: actorId },
+        });
+      }
+      await this.audit(tx, {
+        tenantId,
+        actorId,
+        branchId: branch.id,
+        action: 'price.link',
+        entityType: 'PriceList',
+        entityId: list.id,
+        newJson: JSON.stringify({ branchId: branch.id }),
+      });
+      return { branchId: branch.id };
     });
   }
 
@@ -1717,11 +1939,15 @@ export class OpsService {
       if (list.status !== 'DRAFT') throw new DomainError('VALIDATION_ERROR', 400);
       const now = new Date();
       const nextOn = khartoumDate(list.effectiveFrom ?? now);
-      await this.guardPriceDate(tx, tenantId, list, list.scope === 'BRANCH' ? scope.writeBranchId : null, nextOn);
+      this.guardPriceDate(nextOn);
       if (list.scope === 'PHARMACY') {
         await tx.priceList.updateMany({
           where: { tenantId, scope: 'PHARMACY', listType: list.listType, status: 'ACTIVE' },
           data: { isActive: false, status: 'ARCHIVED', effectiveTo: now },
+        });
+        await tx.branchPriceActivation.updateMany({
+          where: { tenantId, isActive: true },
+          data: { isActive: false },
         });
         await tx.priceList.update({
           where: { id: list.id },
@@ -2015,36 +2241,8 @@ export class OpsService {
     return views.map((view) => ({ ...view, sellPrice: map.get(view.id)?.amount ?? view.sellPrice }));
   }
 
-  private async currentSellingOn(
-    tx: Tx,
-    tenantId: string,
-    list: { id: string; scope: string; listType: string },
-    branchId: string | null,
-  ): Promise<string | null> {
-    if (list.scope === 'BRANCH' && branchId) {
-      const links = await tx.branchPriceActivation.findMany({
-        where: { tenantId, branchId, isActive: true, priceList: { listType: list.listType, status: 'ACTIVE', id: { not: list.id } } },
-        include: { priceList: true },
-      });
-      const latest = links.sort((left, right) => (right.priceList.activatedAt?.getTime() ?? 0) - (left.priceList.activatedAt?.getTime() ?? 0))[0];
-      return latest ? khartoumDate(latest.priceList.effectiveFrom ?? latest.priceList.activatedAt ?? latest.priceList.createdAt) : null;
-    }
-    const current = await tx.priceList.findFirst({
-      where: { tenantId, scope: 'PHARMACY', listType: list.listType, status: 'ACTIVE', isActive: true, id: { not: list.id } },
-      orderBy: [{ activatedAt: 'desc' }, { createdAt: 'desc' }],
-    });
-    return current ? khartoumDate(current.effectiveFrom ?? current.activatedAt ?? current.createdAt) : null;
-  }
-
-  private async guardPriceDate(
-    tx: Tx,
-    tenantId: string,
-    list: { id: string; scope: string; listType: string; sourcePriceListId: string | null },
-    branchId: string | null,
-    nextOn: string,
-  ) {
-    const currentOn = await this.currentSellingOn(tx, tenantId, list, branchId);
-    if (priceListDateGate({ nextOn, currentOn, copied: Boolean(list.sourcePriceListId) }) === 'PRICE_DATE') {
+  private guardPriceDate(nextOn: string) {
+    if (priceListDateGate({ nextOn, today: khartoumDate() }) === 'PRICE_DATE') {
       throw new DomainError('PRICE_DATE', 409);
     }
   }
@@ -2058,14 +2256,14 @@ export class OpsService {
   ) {
     const now = new Date();
     const starts = effectiveFrom ?? list.effectiveFrom ?? now;
-    const link = list.scope === 'BRANCH'
-      ? await tx.branchPriceActivation.findFirst({ where: { tenantId, priceListId: list.id } })
-      : null;
-    await this.guardPriceDate(tx, tenantId, list, link?.branchId ?? null, khartoumDate(starts));
+    this.guardPriceDate(khartoumDate(starts));
     await tx.priceList.updateMany({
       where: { tenantId, scope: list.scope, listType: list.listType, status: 'ACTIVE', id: { not: list.id } },
       data: { isActive: false, status: 'ARCHIVED', effectiveTo: now },
     });
+    if (list.scope === 'PHARMACY') {
+      await tx.branchPriceActivation.updateMany({ where: { tenantId, isActive: true }, data: { isActive: false } });
+    }
     await tx.priceList.update({
       where: { id: list.id },
       data: {
@@ -2098,6 +2296,39 @@ export class OpsService {
     }
   }
 
+  private async reconcileDuplicateActivePriceLists(tx: Tx, tenantId: string): Promise<void> {
+    const now = new Date();
+    const lists = await tx.priceList.findMany({ where: { tenantId } });
+    const rows = lists.map((list) => ({
+      id: list.id,
+      scope: list.scope,
+      status: list.status,
+      isActive: list.isActive,
+      activatedAt: list.activatedAt?.toISOString() ?? null,
+      createdAt: list.createdAt.toISOString(),
+    }));
+    for (const id of duplicateActivePharmacyListIds(rows)) {
+      await tx.priceList.update({
+        where: { id },
+        data: { isActive: false, status: 'ARCHIVED', effectiveTo: now },
+      });
+    }
+    const activeLinks = await tx.branchPriceActivation.findMany({ where: { tenantId, isActive: true } });
+    const byBranch = new Map<string, typeof activeLinks>();
+    for (const link of activeLinks) {
+      const bucket = byBranch.get(link.branchId) ?? [];
+      bucket.push(link);
+      byBranch.set(link.branchId, bucket);
+    }
+    for (const [, links] of byBranch) {
+      if (links.length <= 1) continue;
+      const sorted = [...links].sort((left, right) => right.updatedAt.getTime() - left.updatedAt.getTime());
+      for (const link of sorted.slice(1)) {
+        await tx.branchPriceActivation.update({ where: { id: link.id }, data: { isActive: false } });
+      }
+    }
+  }
+
   private async priceQuote(
     tx: Tx,
     tenantId: string,
@@ -2105,6 +2336,7 @@ export class OpsService {
     productIds: string[],
   ): Promise<Map<string, { amount: string; listId: string; version: number }>> {
     const map = new Map<string, { amount: string; listId: string; version: number }>();
+    await this.reconcileDuplicateActivePriceLists(tx, tenantId);
     const due = await tx.priceList.findMany({
       where: { tenantId, status: 'SCHEDULED', effectiveFrom: { lte: new Date() } },
       orderBy: { createdAt: 'asc' },
@@ -2117,21 +2349,28 @@ export class OpsService {
       }
     }
     if (productIds.length === 0) return map;
-    const shared = await tx.priceList.findFirst({
-      where: { tenantId, scope: 'PHARMACY', isActive: true, status: 'ACTIVE' },
-      orderBy: [{ activatedAt: 'desc' }, { createdAt: 'desc' }],
+    const [lists, activations] = await Promise.all([
+      tx.priceList.findMany({ where: { tenantId } }),
+      tx.branchPriceActivation.findMany({ where: { tenantId } }),
+    ]);
+    const listById = new Map(lists.map((list) => [list.id, list]));
+    const listId = resolveSellingPriceListId({
+      branchId,
+      lists: lists.map((list) => ({
+        id: list.id,
+        scope: list.scope,
+        status: list.status,
+        isActive: list.isActive,
+        activatedAt: list.activatedAt?.toISOString() ?? null,
+        createdAt: list.createdAt.toISOString(),
+      })),
+      branchLinks: activations.map((row) => ({
+        branchId: row.branchId,
+        priceListId: row.priceListId,
+        isActive: row.isActive,
+        activatedAt: listById.get(row.priceListId)?.activatedAt?.toISOString() ?? null,
+      })),
     });
-    let listId = shared?.id ?? null;
-    if (branchId) {
-      const activeLinks = await tx.branchPriceActivation.findMany({
-        where: { tenantId, branchId, isActive: true },
-        include: { priceList: true },
-      });
-      const activation = activeLinks.sort(
-        (left, right) => (right.priceList.activatedAt?.getTime() ?? 0) - (left.priceList.activatedAt?.getTime() ?? 0),
-      )[0];
-      if (activation) listId = activation.priceListId;
-    }
     if (!listId) return map;
     const list = await tx.priceList.findFirst({ where: { id: listId, tenantId } });
     const rows = await tx.productPrice.findMany({
@@ -2226,6 +2465,33 @@ export class OpsService {
     }
   }
 
+  async updatePriceDate(
+    tenantId: string,
+    actorId: string,
+    input: { priceListId: string; effectiveFrom: string },
+  ) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const scope = await this.access(tx, tenantId, actorId, null, null, false);
+      if (!scope.canViewAll) throw new DomainError('UNAUTHORIZED', 403);
+      const list = await tx.priceList.findFirst({ where: { id: input.priceListId, tenantId } });
+      if (!list || list.status === 'ARCHIVED') throw new DomainError('VALIDATION_ERROR', 400);
+      this.guardPriceDate(input.effectiveFrom);
+      await tx.priceList.update({
+        where: { id: list.id },
+        data: { effectiveFrom: new Date(`${input.effectiveFrom}T00:00:00+02:00`), updatedBy: actorId },
+      });
+      await this.audit(tx, {
+        tenantId,
+        actorId,
+        action: 'price.date',
+        entityType: 'PriceList',
+        entityId: list.id,
+        newJson: JSON.stringify({ effectiveFrom: input.effectiveFrom }),
+      });
+      return { effectiveFrom: input.effectiveFrom };
+    });
+  }
+
   async copyPriceList(
     tenantId: string,
     actorId: string,
@@ -2233,6 +2499,7 @@ export class OpsService {
     adjust: RenewAdjust = 'SAME',
     value = '0.00',
     names?: { nameAr: string; nameEn: string },
+    effectiveOn?: string,
   ) {
     try {
       return await this.prisma.withTenant(tenantId, async (tx) => {
@@ -2246,6 +2513,12 @@ export class OpsService {
         const id = randomUUID();
         const link = await tx.branchPriceActivation.findFirst({ where: { tenantId, priceListId: source.id } });
         const selling = source.status === 'ACTIVE' && (source.scope === 'PHARMACY' ? source.isActive : Boolean(link?.isActive));
+        const starts = /^\d{4}-\d{2}-\d{2}$/.test(effectiveOn ?? '')
+          ? effectiveOn
+          : selling
+            ? khartoumDate(source.effectiveFrom ?? khartoumDayStart())
+            : null;
+        if (starts) this.guardPriceDate(starts);
         await tx.priceList.create({
           data: {
             id,
@@ -2259,7 +2532,7 @@ export class OpsService {
             status: 'DRAFT',
             versionNo: source.versionNo + 1,
             sourcePriceListId: source.id,
-            effectiveFrom: selling ? source.effectiveFrom ?? khartoumDayStart() : null,
+            effectiveFrom: starts ? new Date(`${starts}T00:00:00+02:00`) : null,
             notes: source.notes,
             createdBy: actorId,
           },
@@ -2503,13 +2776,23 @@ export class OpsService {
   async proposeUsdRate(
     tenantId: string,
     actorId: string,
-    input: { rate: string; action: 'preview' | 'draft' | 'submit' | 'reject' | 'approve'; proposalId?: string; reason?: string; effectiveOn?: string },
+    input: { rate: string; action: 'preview' | 'draft' | 'submit' | 'reject' | 'approve' | 'rate'; proposalId?: string; reason?: string; effectiveOn?: string },
   ) {
     const nextRate = money(input.rate);
     if (cmpMoney(nextRate, '0.00') <= 0) throw new DomainError('VALIDATION_ERROR', 400);
     return this.prisma.withTenant(tenantId, async (tx) => {
       const scope = await this.access(tx, tenantId, actorId, null, null, false);
       if (!scope.canViewAll) throw new DomainError('UNAUTHORIZED', 403);
+      if (input.action === 'rate') {
+        const approved = await tx.exchangeRate.findFirst({ where: { tenantId, status: 'APPROVED' }, orderBy: { notedAt: 'desc' } });
+        const oldRate = approved ? cash(approved.rate) : '0.00';
+        const rateId = randomUUID();
+        await tx.exchangeRate.create({
+          data: { id: rateId, tenantId, currency: 'USD', rate: nextRate, status: 'APPROVED', notedAt: new Date(), createdBy: actorId },
+        });
+        await this.audit(tx, { tenantId, actorId, action: 'price.rate_keep', entityType: 'ExchangeRate', entityId: rateId, newJson: JSON.stringify({ oldRate, newRate: nextRate }) });
+        return { oldRate, newRate: nextRate, changePct: priceChangePct(oldRate, nextRate), status: 'APPROVED', rows: [] as RatePreview[] };
+      }
       if (input.action === 'reject' || input.action === 'approve') {
         if (!input.proposalId) throw new DomainError('VALIDATION_ERROR', 400);
         const list = await tx.priceList.findFirst({ where: { id: input.proposalId, tenantId } });
@@ -2564,6 +2847,8 @@ export class OpsService {
       if (input.action === 'preview') {
         return { oldRate, newRate: nextRate, changePct, status: 'PREVIEW', rows };
       }
+      const starts = input.effectiveOn && /^\d{4}-\d{2}-\d{2}$/.test(input.effectiveOn) ? input.effectiveOn : khartoumDate();
+      this.guardPriceDate(starts);
       const status = input.action === 'submit' ? 'PENDING' : 'DRAFT';
       const listId = randomUUID();
       const highest = await tx.priceList.aggregate({ where: { tenantId }, _max: { versionNo: true } });
@@ -2580,6 +2865,7 @@ export class OpsService {
           versionNo: version,
           sourcePriceListId: active?.id ?? null,
           exchangeRateUsed: nextRate,
+          effectiveFrom: new Date(`${starts}T00:00:00+02:00`),
           isActive: false,
           createdBy: actorId,
         },
@@ -2800,6 +3086,8 @@ export class OpsService {
           ordered: line.qty,
           received: line.receivedQty,
         }));
+        const productIds = input.lines.map((row) => row.productId).filter((id): id is string => Boolean(id));
+        const packsByProduct = productIds.length > 0 ? await this.itemPacks(tx, tenantId, productIds) : new Map<string, ItemPack>();
         const warnings: string[] = [];
         const ready: {
           productId: string;
@@ -2831,11 +3119,16 @@ export class OpsService {
           if (!product) throw new DomainError('NOT_FOUND', 404);
           const condition = line.condition ?? 'AVAILABLE';
           const bonus = line.bonusQty ?? 0;
+          const pack = line.pack ?? packsByProduct.get(product.id) ?? null;
+          const orderLine = order?.lines.find((row) => row.productId === product.id);
+          const unitCode = line.unitCode ?? orderLine?.unitCode ?? 'PIECE';
+          const orderQty = line.qty;
+          const stockPieces = qtyToStockPieces(orderQty, pack, unitCode);
           if (condition === 'AVAILABLE') {
             const warning = assertReceiptLine({
               expiry: line.expiry,
               manufacturedAt: line.manufacturedAt ?? '',
-              qty: line.qty,
+              qty: stockPieces,
               bonusQty: bonus,
               serial: line.serialNo ?? '',
               trackSerial: product.trackSerial,
@@ -2850,15 +3143,14 @@ export class OpsService {
             const duplicate = await tx.stockLot.findFirst({ where: { tenantId, serialNo: line.serialNo.trim() } });
             if (duplicate) throw new DomainError('VALIDATION_ERROR', 400);
           }
-          const pieces = line.qty + bonus;
-          const takes = order ? claimReceiptQty(buckets, product.id, pieces, override) : [];
+          const takes = order ? claimReceiptQty(buckets, product.id, orderQty, override) : [];
           if (cmpMoney(money(line.unitCost), '0.00') <= 0) throw new DomainError('VALIDATION_ERROR', 400);
           if (line.pack) await this.rememberPack(tx, tenantId, actorId, product.id, line.pack);
-          const unitCost = pieceUnitCost(money(line.unitCost), line.pack ?? null);
+          const unitCost = pieceUnitCost(money(line.unitCost), pack);
           ready.push({
             productId: product.id,
             batchNo,
-            qty: line.qty,
+            qty: stockPieces,
             bonus,
             unitCost,
             foreignUnit: unitCost,
@@ -2869,7 +3161,7 @@ export class OpsService {
             condition,
             manufacturedAt: line.manufacturedAt ?? '',
             serialNo: line.serialNo?.trim() ?? '',
-            unitCode: line.unitCode || 'BASE',
+            unitCode: pack?.outer ?? unitCode,
             trackSerial: product.trackSerial,
             purchaseLineId: takes[0]?.id ?? null,
           });
@@ -3645,23 +3937,10 @@ export class OpsService {
 
   private rethrow(error: unknown): never {
     if (error instanceof DomainError) throw error;
-    if (error instanceof MoneyError) throw new DomainError('VALIDATION_ERROR', 400);
-    if (
-      error instanceof Error &&
-      (error.message === 'STOCK_SHORT' ||
-        error.message === 'UNBALANCED' ||
-        error.message === 'QTY' ||
-        error.message === 'EXPIRED' ||
-        error.message === 'DATE_ORDER' ||
-        error.message === 'SERIAL' ||
-        error.message === 'OVER_RECEIVE' ||
-        error.message === 'OVER_POST' ||
-        error.message === 'NOT_ON_ORDER' ||
-        error.message === 'NEED_BATCH')
-    ) {
-      const status = error.message === 'STOCK_SHORT' || error.message === 'OVER_POST' ? 409 : 400;
-      const code =
-        error.message === 'QTY' || error.message === 'DATE_ORDER' || error.message === 'SERIAL' ? 'VALIDATION_ERROR' : error.message;
+    if (error instanceof MoneyError) throw new DomainError('VALIDATION_ERROR', 400, { hint: 'COST' });
+    if (error instanceof Error && error.message in { STOCK_SHORT: 1, UNBALANCED: 1, QTY: 1, EXPIRED: 1, DATE_ORDER: 1, SERIAL: 1, OVER_RECEIVE: 1, OVER_POST: 1, NOT_ON_ORDER: 1, NEED_BATCH: 1, RATE: 1, COST: 1, PRICE: 1 }) {
+      const code = error.message;
+      const status = code === 'STOCK_SHORT' || code === 'OVER_POST' || code === 'OVER_RECEIVE' || code === 'NOT_ON_ORDER' ? 409 : 400;
       throw new DomainError(code, status);
     }
     throw error;

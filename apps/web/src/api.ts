@@ -13,6 +13,35 @@ export class ApiError extends Error {
   }
 }
 
+const GENERIC = ['Something went wrong.', 'حدث خطأ غير متوقع.'];
+
+function isGenericMessage(message: string): boolean {
+  const trimmed = message.trim();
+  if (!trimmed) return true;
+  return GENERIC.some((line) => trimmed === line || trimmed.startsWith(line));
+}
+
+function fieldSuffix(fields: Record<string, string>): string {
+  const parts = Object.entries(fields).map(([key, value]) => `${key}: ${value}`);
+  return parts.length ? ` (${parts.join(' · ')})` : '';
+}
+
+export function formatUserError(caught: unknown, fallback: string): string {
+  if (caught instanceof ApiError) {
+    let msg = caught.message.trim();
+    const suffix = fieldSuffix(caught.fields);
+    if (!msg) msg = fallback;
+    else if (suffix && !msg.includes(suffix.trim())) msg += suffix;
+    if (isGenericMessage(msg) && caught.code && caught.code !== 'INTERNAL') {
+      const label = caught.code.replaceAll('_', ' ').toLowerCase();
+      msg = `${label}${suffix || `: ${msg}`}`;
+    }
+    return msg;
+  }
+  if (caught instanceof Error && caught.message.trim()) return caught.message.trim();
+  return fallback;
+}
+
 function fieldsOf(details: unknown): Record<string, string> {
   if (!details || typeof details !== 'object') return {};
   const fields = (details as { fields?: unknown }).fields;
@@ -33,12 +62,8 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, { ...init, headers, credentials: 'include' });
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as { message?: string; code?: string; details?: unknown } | null;
-    throw new ApiError(
-      body?.message ?? i18n.t('empty'),
-      response.status,
-      body?.code ?? '',
-      fieldsOf(body?.details),
-    );
+    const message = body?.message?.trim() || i18n.t('apiError');
+    throw new ApiError(message, response.status, body?.code ?? '', fieldsOf(body?.details));
   }
   return response.json() as Promise<T>;
 }

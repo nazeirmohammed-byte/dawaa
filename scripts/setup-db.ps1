@@ -137,6 +137,7 @@ Invoke-SqlFile (Join-Path $root 'infra\sql\014_place_check.sql')
 Invoke-SqlFile (Join-Path $root 'infra\sql\017_global_library.sql')
 Invoke-SqlFile (Join-Path $root 'infra\sql\018_optional_batch.sql')
 Invoke-SqlFile (Join-Path $root 'infra\sql\019_supplier_batches.sql')
+Invoke-SqlFile (Join-Path $root 'infra\sql\020_purchase_line_unit.sql')
 
 Write-Host 'Seeding demo tenant...'
 corepack pnpm --filter @dawaa/shared build

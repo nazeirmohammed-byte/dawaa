@@ -2,12 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useSearchParams } from 'react-router-dom';
 import { HelpTip } from '../../admin/src/hint';
-import { ApiError, api, type HomeBoard, type Profile, type ReceiptPreview } from './api';
+import { ApiError, api, formatUserError, type HomeBoard, type Profile, type ReceiptPreview } from './api';
 import { ReceiptSlip } from './ReceiptPage';
 import { defaultShelfExpiry, expiryTone, parseGs1 } from './expiry';
 import { clearInventoryDraft, StockPostDialog, type Stocking } from './stock-post';
 import { LibraryRequest } from './library-request';
 import { formatKhartoum, formatMoney, sumAmounts } from './locale';
+import { MedicineSearchResult } from './components/MedicineSearchResult';
 import { useUi } from './ui';
 
 type Named = { id: string; nameAr: string; nameEn: string };
@@ -69,7 +70,7 @@ function useData<T>(path: string, reloadKey: number) {
         if (live) setData(body);
       })
       .catch((caught: unknown) => {
-        if (live) setError(caught instanceof Error ? caught.message : t('empty'));
+        if (live) setError(formatUserError(caught, t('apiError')));
       });
     return () => {
       live = false;
@@ -226,6 +227,17 @@ function showCount(value: number, language: string): string {
   return value.toLocaleString(language.startsWith('ar') ? 'ar' : 'en');
 }
 
+function orderUnitLabel(unitCode: string, t: (key: 'packBox' | 'packStrip' | 'packBottle' | 'packPiece') => string): string {
+  if (unitCode === 'BOX') return t('packBox');
+  if (unitCode === 'STRIP') return t('packStrip');
+  if (unitCode === 'BOTTLE') return t('packBottle');
+  return t('packPiece');
+}
+
+function lineContainerPieces(line: Pick<EntryLine, 'outer' | 'inner' | 'perBox' | 'perInner' | 'qty'>): number {
+  return piecesEach({ outer: line.outer, inner: line.inner, perBox: line.perBox, perInner: line.perInner }) * line.qty;
+}
+
 function packSentence(draft: EntryDraft, word: (key: 'packBox' | 'packStrip' | 'packBottle' | 'packPiece') => string, language: string): string {
   const n = (value: number) => showCount(value, language);
   if (draft.outer === 'PIECE') return `${n(draft.count)} ${word('packPiece')}`;
@@ -348,6 +360,14 @@ function moneyOk(value: string): boolean {
   return /^\d+(\.\d{1,2})?$/.test(value);
 }
 
+function inventoryState(product: Product): 'in' | 'low' | 'out' | 'expired' | 'waiting' {
+  if (product.qty > 0 && product.qty <= product.reorderLevel) return 'low';
+  if (product.qty > 0) return 'in';
+  if ((product.expiredQty ?? 0) > 0) return 'expired';
+  if ((product.remaining ?? 0) > 0) return 'waiting';
+  return 'out';
+}
+
 type Product = Named & {
   sku: string;
   categoryId: string;
@@ -363,6 +383,8 @@ type Product = Named & {
   gtin?: string;
   nearestExpiry: string | null;
   location: string;
+  remaining?: number;
+  expiredQty?: number;
 };
 
 export function InventoryPage() {
@@ -681,7 +703,7 @@ export function InventoryPage() {
       setTick((value) => value + 1);
       scanRef.current?.focus();
     } catch (caught: unknown) {
-      setNote(caught instanceof Error ? caught.message : t('empty'));
+      setNote(formatUserError(caught, t('apiError')));
     } finally {
       setSaving('');
     }
@@ -716,6 +738,15 @@ export function InventoryPage() {
   const library = catalogReady
     ? hits.filter((item) => !(localKeys.has(item.code) || (item.gtin && localKeys.has(item.gtin)))).slice(0, 24)
     : [];
+  const shelf = data?.products ?? [];
+  const heldItems = shelf.filter((product) => product.qty > 0 || (product.expiredQty ?? 0) > 0);
+  const waitingItems = shelf.filter((product) => (product.remaining ?? 0) > 0);
+  const asked = query.trim().toLowerCase();
+  const listed = shelf.filter((product) => {
+    const onShelf = product.qty > 0 || (product.remaining ?? 0) > 0 || (product.expiredQty ?? 0) > 0;
+    if (!asked) return onShelf;
+    return [product.sku, product.nameAr, product.nameEn, product.genericName].some((value) => value.toLowerCase().includes(asked));
+  });
 
   return (
     <Page title={t('inventory')} error={note || error}>
@@ -1166,13 +1197,26 @@ export function InventoryPage() {
         <span>{t('find')}</span>
         <input value={query} onChange={(event) => setQuery(event.target.value)} />
       </label>
+      <p className="lede">
+        {t('invHeld', {
+          items: showCount(heldItems.length, ui.language),
+          qty: showCount(heldItems.reduce((sum, product) => sum + product.qty, 0), ui.language),
+        })}
+        {' · '}
+        {t('invLeft', {
+          items: showCount(waitingItems.length, ui.language),
+          qty: showCount(waitingItems.reduce((sum, product) => sum + (product.remaining ?? 0), 0), ui.language),
+        })}
+      </p>
       <div className="sheet">
         <table>
           <thead>
             <tr>
               <th>{t('sku')}</th>
               <th>{t('nameAr')}</th>
-              <th>{t('qty')}</th>
+              <th>{t('itemStatus')}</th>
+              <th>{t('invOnHand')}</th>
+              <th>{t('remainingQty')}</th>
               <th>{t('expiry')}</th>
               <th>{t('reorder')}</th>
               <th>{t('price')}</th>
@@ -1180,22 +1224,22 @@ export function InventoryPage() {
             </tr>
           </thead>
           <tbody>
-            {data?.products
-              .filter((product) => {
-                const needle = query.trim().toLowerCase();
-                if (!needle) return true;
-                return [product.sku, product.nameAr, product.nameEn, product.genericName].some((value) =>
-                  value.toLowerCase().includes(needle),
-                );
-              })
-              .map((product) => (
+            {listed.map((product) => {
+              const state = inventoryState(product);
+              const statusText =
+                state === 'in' ? t('stockFull') : state === 'low' ? t('low') : state === 'expired' ? t('expired') : state === 'waiting' ? t('stockPending') : t('stockOut');
+              return (
               <tr key={product.id}>
                 <td>{product.sku}</td>
                 <td>
                   {label(product, ui.language)}
                   {product.isLocal ? <em className="est">{t('localItem')}</em> : null}
                 </td>
-                <td>{product.qty}</td>
+                <td>
+                  <span className={state === 'in' ? 'chip' : state === 'low' || state === 'waiting' ? 'chip warn' : 'chip bad'}>{statusText}</span>
+                </td>
+                <td>{showCount(product.qty, ui.language)}</td>
+                <td>{showCount(product.remaining ?? 0, ui.language)}</td>
                 <ExpiryCell iso={product.nearestExpiry} />
                 <td>{product.reorderLevel}</td>
                 <td>{product.sellPrice}</td>
@@ -1208,10 +1252,12 @@ export function InventoryPage() {
                   </button>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
+      {listed.length === 0 ? <p className="lede">{t('empty')}</p> : null}
     </Page>
   );
 }
@@ -1313,6 +1359,8 @@ type PurchaseBook = {
       productId: string;
       qty: number;
       receivedQty: number;
+      unitCode?: string;
+      pack?: { outer: PackKind; inner: InnerKind; perBox: number; perInner: number } | null;
       unitCost: string;
       lineTotal: string;
       nameAr: string;
@@ -1493,7 +1541,7 @@ function SuppliersPage() {
               className="primary fit"
               type="button"
               disabled={!ready}
-              onClick={() => void saveSupplier().catch((caught: unknown) => setNote(caught instanceof Error ? caught.message : t('empty')))}
+              onClick={() => void saveSupplier().catch((caught: unknown) => setNote(formatUserError(caught, t('apiError'))))}
             >
               {t('saveSupplier')}
             </button>
@@ -1543,7 +1591,7 @@ function SuppliersPage() {
                         className="ghost"
                         type="button"
                         onClick={() =>
-                          void setActive(row, !row.active).catch((caught: unknown) => setNote(caught instanceof Error ? caught.message : t('empty')))
+                          void setActive(row, !row.active).catch((caught: unknown) => setNote(formatUserError(caught, t('apiError'))))
                         }
                       >
                         {row.active ? t('deactivateSupplier') : t('activateSupplier')}
@@ -1599,8 +1647,12 @@ function PurchaseOrders() {
       productId: string;
       name: string;
       detail: string;
+      ordered: number;
       left: number;
       qty: number;
+      unitCode: string;
+      pack: { outer: PackKind; inner: InnerKind; perBox: number; perInner: number } | null;
+      packText: string;
       unitCost: string;
       batchNo: string;
       expiry: string;
@@ -1669,16 +1721,31 @@ function PurchaseOrders() {
       ? hits.flatMap((item) => [item.code.toLowerCase(), item.genericName.toLowerCase(), ...(item.aliases ?? []).map((alias) => alias.toLowerCase())])
       : [],
   );
+  const tenantSkus = new Set((data?.products ?? []).map((row) => row.sku.toLowerCase()));
+  const tenantGtins = new Set(
+    (data?.products ?? []).map((row) => row.gtin.replace(/^0+/, '')).filter((value) => value.length > 0),
+  );
   const stockHits = (data?.products ?? [])
     .filter((row) => {
       if (!needle) return true;
-      const own = `${row.nameAr} ${row.nameEn} ${row.sku} ${row.genericName} ${row.gtin}`.toLowerCase().includes(needle);
+      const own = [row.sku, row.nameAr, row.nameEn, row.genericName, row.gtin, row.strength, row.form].some((value) =>
+        value.toLowerCase().includes(needle),
+      );
       return own || linked.has(row.sku.toLowerCase()) || linked.has(row.genericName.toLowerCase());
     })
-    .slice(0, 8);
-  const library = catalogReady ? hits.filter((item) => !stockHits.some((row) => row.sku === item.code)).slice(0, 12) : [];
+    .slice(0, needle ? 48 : 24);
+  const library = catalogReady
+    ? hits
+        .filter((item) => {
+          if (tenantSkus.has(item.code.toLowerCase())) return false;
+          const gtin = (item.gtin ?? '').replace(/^0+/, '');
+          return !(gtin.length > 0 && tenantGtins.has(gtin));
+        })
+        .slice(0, 48)
+    : [];
+  const pharmacyTotal = data?.products.length ?? 0;
   const step = !supplierId ? 1 : lines.length === 0 ? 2 : 3;
-  const pieceTotal = lines.reduce((sum, line) => sum + line.qty + line.bonusQty, 0);
+  const pieceTotal = lines.reduce((sum, line) => sum + lineContainerPieces(line) + line.bonusQty, 0);
   const supplier = data?.suppliers.find((row) => row.id === supplierId);
   const supplierName = supplier ? label(supplier, ui.language) : '';
   const priorityLabel = priority === 'LOW' ? t('priorityLow') : priority === 'HIGH' ? t('priorityHigh') : t('priorityNormal');
@@ -1841,7 +1908,7 @@ function PurchaseOrders() {
       setNote(t('serial'));
       return;
     }
-    const qty = piecesOf(draft);
+    const qty = draft.count;
     if (qty < 1 || qty > 1_000_000) {
       setNote(t('entryTooMany'));
       return;
@@ -1946,14 +2013,28 @@ function PurchaseOrders() {
         .filter((line) => line.qty - line.receivedQty > 0)
         .map((line) => {
           const product = data?.products.find((row) => row.id === line.productId);
+          const pack = line.pack ?? null;
+          const unitCode = line.unitCode ?? pack?.outer ?? 'PIECE';
           const left = line.qty - line.receivedQty;
+          const packDraft: EntryDraft = {
+            ...blankDraft(),
+            outer: pack?.outer ?? 'PIECE',
+            inner: pack?.inner ?? 'PIECE',
+            perBox: pack?.perBox ?? 1,
+            perInner: pack?.perInner ?? 1,
+            count: line.qty,
+          };
           return {
             key: line.id,
             productId: line.productId,
             name: label(line, ui.language),
             detail: `${line.strength ?? ''} · ${line.form ?? ''}`,
+            ordered: line.qty,
             left,
             qty: left,
+            unitCode,
+            pack,
+            packText: pack ? packSentence(packDraft, word, ui.language) : '',
             unitCost: line.unitCost && line.unitCost !== '0.00' ? line.unitCost : '',
             batchNo: 'N/A',
             expiry: '',
@@ -2000,6 +2081,8 @@ function PurchaseOrders() {
             productId: row.productId,
             qty: row.qty,
             unitCost: row.unitCost,
+            unitCode: row.unitCode,
+            pack: row.pack ?? undefined,
             batchNo: writtenBatch(row.batchNo),
             expiry: row.expiry,
             location: row.location,
@@ -2147,7 +2230,7 @@ function PurchaseOrders() {
                 setContract({ nameAr: '', nameEn: '', phone: '', city: '' });
                 setTick((value) => value + 1);
               } catch (caught) {
-                ui.push({ tone: 'urgent', title: t('addSupplier'), body: caught instanceof Error ? caught.message : t('empty') });
+                ui.push({ tone: 'urgent', title: t('addSupplier'), body: formatUserError(caught, t('apiError')) });
               }
             })();
           }}
@@ -2224,32 +2307,43 @@ function PurchaseOrders() {
                   />
                 </label>
                 <p className="lede">{t('findScan')}</p>
-                <ul className="med-list">
+                {needle.length === 1 ? <p className="lede">{t('typeToSearch')}</p> : null}
+                {!needle && pharmacyTotal > stockHits.length ? (
+                  <p className="lede">{t('buyBrowseHint', { count: showCount(pharmacyTotal, ui.language) })}</p>
+                ) : null}
+                {needle.length >= 2 && catalogReady && (hits.length >= 48 || stockHits.length >= 48) ? (
+                  <p className="lede">{t('buySearchMore')}</p>
+                ) : null}
+                <ul className="med-list buy-med-list">
                   {stockHits.map((product) => (
                     <li key={product.id}>
-                      <button type="button" className="med-row" onClick={() => chooseStock(product)}>
-                        <strong>{label(product, ui.language)}</strong>
-                        <small>
-                          {product.strength} · {product.form}
-                        </small>
-                        <em className="med-tag stock">{t('entryInStock')}</em>
-                      </button>
+                      <MedicineSearchResult
+                        primary={label(product, ui.language)}
+                        meta={`${product.sku} · ${product.strength} · ${product.form}`}
+                        secondary={t('buyPharmacyMed')}
+                        dosageForm={product.form}
+                        nameEn={product.nameEn}
+                        nameAr={product.nameAr}
+                        onPick={() => chooseStock(product)}
+                      />
                     </li>
                   ))}
                   {library.map((item) => (
                     <li key={item.code}>
-                      <button type="button" className="med-row" onClick={() => chooseCatalog(item)}>
-                        <strong>{label(item, ui.language)}</strong>
-                        <small>
-                          {item.strength} · {item.form}
-                          {item.gtin ? ` · ${item.gtin}` : ''}
-                        </small>
-                        <em className="med-tag lib">{t('entryLibrary')}</em>
-                      </button>
+                      <MedicineSearchResult
+                        primary={label(item, ui.language)}
+                        meta={`${item.code} · ${item.strength} · ${item.form}${item.gtin ? ` · ${item.gtin}` : ''}`}
+                        secondary={t('entryLibrary')}
+                        dosageForm={item.form}
+                        nameEn={item.nameEn}
+                        nameAr={item.nameAr}
+                        onPick={() => chooseCatalog(item)}
+                      />
                     </li>
                   ))}
                 </ul>
                 {needle.length >= 2 && catalogReady && stockHits.length === 0 && library.length === 0 ? <LibraryRequest query={pick} /> : null}
+                {needle.length >= 2 && !catalogReady ? <p className="lede">{t('working')}</p> : null}
                 {needle.length < 2 && stockHits.length === 0 && library.length === 0 ? <p className="lede">{t('entryNone')}</p> : null}
               </>
             ) : null}
@@ -2438,14 +2532,29 @@ function PurchaseOrders() {
               <div className="pack-body" key={row.key}>
                 <strong>{row.name}</strong>
                 <small>{row.detail}</small>
-                <p className="lede">{t('remainingQty')} {showCount(row.left, ui.language)}</p>
+                {row.packText ? <p className="lede">{row.packText}</p> : null}
+                <p className="lede">
+                  {t('receiveOrderQty', {
+                    left: showCount(row.left, ui.language),
+                    total: showCount(row.ordered, ui.language),
+                    unit: orderUnitLabel(row.unitCode, (key) => t(key)),
+                  })}
+                </p>
                 <div className="entry-money">
                   <label className="field">
                     <span>{t('actualCost')}</span>
                     <input inputMode="decimal" value={row.unitCost} onChange={(event) => setReceive({ ...receive, rows: receive.rows.map((item) => (item.key === row.key ? { ...item, unitCost: event.target.value } : item)) })} />
                   </label>
                   <label className="field">
-                    <span>{t('invQty')}</span>
+                    <span>
+                      {row.unitCode === 'BOX'
+                        ? t('orderQtyBox')
+                        : row.unitCode === 'STRIP'
+                          ? t('orderQtyStrip')
+                          : row.unitCode === 'BOTTLE'
+                            ? t('orderQtyBottle')
+                            : t('orderQtyPiece')}
+                    </span>
                     <CountStep value={row.qty} min={0} onChange={(qty) => setReceive({ ...receive, rows: receive.rows.map((item) => (item.key === row.key ? { ...item, qty: Math.min(row.left, qty) } : item)) })} />
                   </label>
                   <label className="field">
@@ -2596,7 +2705,7 @@ export function UsersPage() {
       setForm({ displayName: '', email: '', phone: '', password: '', roleCode: 'CASHIER', branchId: '' });
       setTick((value) => value + 1);
     } catch (caught) {
-      setNote(caught instanceof Error ? caught.message : t('empty'));
+      setNote(formatUserError(caught, t('apiError')));
     }
   }
 
@@ -2820,7 +2929,7 @@ function AlertThresholds({ rows, onSaved }: { rows: { key: string; valueAr: stri
             ui.push({ tone: 'info', title: t('saved'), body: t('alertThresholds') });
             onSaved();
           })
-          .catch((caught: unknown) => setNote(caught instanceof Error ? caught.message : t('empty')));
+          .catch((caught: unknown) => setNote(formatUserError(caught, t('apiError'))));
       }}
     >
       <h2>{t('alertThresholds')}</h2>
@@ -3396,6 +3505,7 @@ type PriceBoard = {
   using: 'PHARMACY' | 'BRANCH';
   branchId: string | null;
   sellingOn: string | null;
+  sellingId: string | null;
   selectedId: string | null;
   lists: {
     id: string;
@@ -3408,6 +3518,7 @@ type PriceBoard = {
     locked?: boolean;
     allowedActions?: string[];
     lockReason?: 'draft' | 'active' | 'usedOnSales';
+    copied?: boolean;
     sourceNameAr?: string | null;
     sourceNameEn?: string | null;
     effectiveFrom?: string | null;
@@ -3415,14 +3526,13 @@ type PriceBoard = {
     branchAr: string | null;
     branchEn: string | null;
   }[];
-  items: { productId: string; sku: string; nameAr: string; nameEn: string; amount: string; cost?: string; qty?: number; listedPrice?: string }[];
+  items: { productId: string; sku: string; nameAr: string; nameEn: string; genericName?: string; amount: string; cost?: string; qty?: number; listedPrice?: string }[];
 };
 
-type PricePick = { code: string; name: string; amount: string; selected: boolean; stockPrice: string; qty: number; fresh?: boolean };
+type PriceLineDraft = { productId: string; sku: string; nameAr: string; nameEn: string; amount: string };
 
-function dayAfter(value: string) {
-  const [year, month, day] = value.split('-').map(Number);
-  return new Date(Date.UTC(year, month - 1, day + 1)).toISOString().slice(0, 10);
+function khartoumToday() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Khartoum' });
 }
 
 export function PricesPage() {
@@ -3430,17 +3540,17 @@ export function PricesPage() {
   const ui = useUi();
   const [tick, setTick] = useState(0);
   const [listId, setListId] = useState('');
-  const [composer, setComposer] = useState<'create' | 'add' | 'renew' | null>(null);
-  const [priceStep, setPriceStep] = useState<1 | 2>(1);
-  const [finder, setFinder] = useState('');
-  const [chosen, setChosen] = useState<PricePick[]>([]);
+  const [composer, setComposer] = useState<'create' | 'renew' | null>(null);
+  const [pendingRenew, setPendingRenew] = useState(false);
   const [effectiveOn, setEffectiveOn] = useState('');
+  const [dateDraft, setDateDraft] = useState('');
+  const [addQuery, setAddQuery] = useState('');
+  const [pendingAdds, setPendingAdds] = useState<PriceLineDraft[]>([]);
   const [itemQuery, setItemQuery] = useState('');
   const [bulkValue, setBulkValue] = useState('15');
   const [bulkOp, setBulkOp] = useState('PCT');
   const [previewRows, setPreviewRows] = useState<{ sku: string; oldPrice: string; newPrice: string | null; belowCost: boolean }[]>([]);
   const [rate, setRate] = useState('');
-  const [rateReason, setRateReason] = useState('');
   const [rateEffective, setRateEffective] = useState('');
   const [rateOpen, setRateOpen] = useState(false);
   const [ratePlan, setRatePlan] = useState<{
@@ -3457,11 +3567,18 @@ export function PricesPage() {
   const [adjust, setAdjust] = useState<'SAME' | 'PCT' | 'AMOUNT'>('SAME');
   const [adjustValue, setAdjustValue] = useState('10');
   const [note, setNote] = useState('');
+  const [linkBranch, setLinkBranch] = useState('');
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerListId, setPickerListId] = useState('');
+  const [pickerAdds, setPickerAdds] = useState<PriceLineDraft[]>([]);
+  const [listQuery, setListQuery] = useState('');
   const rates = useData<{ rate: string; notedAt: string; status?: string }[]>('/api/v1/ops/prices/rates', tick);
+  const network = useData<{ branches: { id: string; nameAr: string; nameEn: string | null }[] }>('/api/v1/ops/network', tick);
   const board = useData<PriceBoard>(listId ? `/api/v1/ops/prices?listId=${listId}` : '/api/v1/ops/prices', tick);
   const branchChosen = (localStorage.getItem('dawaa.branch') ?? '') !== '' && localStorage.getItem('dawaa.branch') !== 'all';
   const sellingOn = board.data?.sellingOn ?? null;
-  const dateBlocked = Boolean(sellingOn && /^\d{4}-\d{2}-\d{2}$/.test(effectiveOn) && effectiveOn <= sellingOn);
+  const today = khartoumToday();
+  const backDate = /^\d{4}-\d{2}-\d{2}$/.test(effectiveOn) && effectiveOn < today;
 
   useEffect(() => {
     if (!board.data) return;
@@ -3469,24 +3586,115 @@ export function PricesPage() {
   }, [board.data]);
 
   const selected = board.data?.lists.find((list) => list.id === (listId || board.data?.selectedId)) ?? null;
+  const sellingId = board.data?.sellingId ?? board.data?.lists.find((list) => list.isActive && list.status === 'ACTIVE')?.id ?? null;
+  const selling = board.data?.lists.find((list) => list.id === sellingId) ?? null;
   const copyNameTaken = Boolean(selected && names.nameAr.trim() === selected.nameAr && names.nameEn.trim() === selected.nameEn);
+  const allLists = board.data?.lists ?? [];
+  const listNeedle = listQuery.trim().toLowerCase();
+  const searchedLists = listNeedle
+    ? allLists.filter((list) => {
+        const hay = [
+          list.nameAr,
+          list.nameEn,
+          list.status ?? '',
+          list.scope,
+          list.branchAr ?? '',
+          list.branchEn ?? '',
+          listDay(list.effectiveFrom),
+          String(list.versionNo ?? 1),
+        ]
+          .join(' ')
+          .toLowerCase();
+        return hay.includes(listNeedle);
+      })
+    : null;
+  const recentLists = [...allLists].sort((left, right) => (right.effectiveFrom ?? '').localeCompare(left.effectiveFrom ?? '') || right.id.localeCompare(left.id));
+  const railLists = (() => {
+    if (searchedLists) return searchedLists.slice(0, 24);
+    const actives = recentLists.filter((list) => list.isActive && list.status === 'ACTIVE');
+    const others = recentLists.filter((list) => !actives.some((active) => active.id === list.id));
+    const ordered = [...(selling ? [selling] : []), ...actives.filter((list) => list.id !== selling?.id), ...others];
+    const seen = new Set<string>();
+    return ordered.filter((list) => (seen.has(list.id) ? false : (seen.add(list.id), true))).slice(0, 5);
+  })();
 
-  function stockOffers(mode: 'create' | 'add'): PricePick[] {
-    const priced = new Set((board.data?.items ?? []).filter((item) => item.amount !== '').map((item) => item.sku));
-    return (board.data?.items ?? [])
-      .filter((item) => (item.qty ?? 0) > 0)
-      .filter((item) => mode === 'create' || !priced.has(item.sku))
-      .map((item) => {
-        const stockPrice = item.listedPrice && item.listedPrice !== '0.00' ? item.listedPrice : '';
-        return {
-          code: item.sku,
-          name: label({ nameAr: item.nameAr, nameEn: item.nameEn }, ui.language),
-          amount: stockPrice,
-          selected: mode === 'create' && stockPrice !== '',
-          stockPrice,
-          qty: item.qty ?? 0,
-        };
-      });
+  function listStatus(list: PriceBoard['lists'][number]) {
+    if (list.id === sellingId) return t('priceSellingNow');
+    if (list.status === 'ACTIVE') return t('statusActive');
+    if (list.status === 'ARCHIVED') return t('statusArchived');
+    if (list.status === 'PENDING') return t('statusPending');
+    if (list.status === 'SCHEDULED') return t('statusScheduled');
+    if (list.status === 'REJECTED') return t('statusRejected');
+    return t('statusDraft');
+  }
+
+  function listDay(value?: string | null) {
+    if (!value) return sellingOn ?? '';
+    return new Date(value).toLocaleDateString('en-CA', { timeZone: 'Africa/Khartoum' });
+  }
+
+  function beginRenew(list: PriceBoard['lists'][number]) {
+    setListId(list.id);
+    setPendingRenew(true);
+  }
+
+  useEffect(() => {
+    if (!pendingRenew || !board.data || !selected || board.data.selectedId !== selected.id) return;
+    setPendingRenew(false);
+    setAdjust('SAME');
+    setAdjustValue('10');
+    setNames({ nameAr: `${selected.nameAr} نسخة`, nameEn: `${selected.nameEn} copy` });
+    const sourceDay = listDay(selected.effectiveFrom);
+    setEffectiveOn(sourceDay && sourceDay >= khartoumToday() ? sourceDay : khartoumToday());
+    setComposer('renew');
+  }, [pendingRenew, board.data, selected, sellingOn]);
+
+  useEffect(() => {
+    setDateDraft(selected?.effectiveFrom ? listDay(selected.effectiveFrom) : '');
+    setPendingAdds([]);
+    setAddQuery('');
+  }, [selected?.id, selected?.effectiveFrom]);
+
+  const stockPool = (board.data?.items ?? []).filter(
+    (item) => (item.qty ?? 0) > 0 && item.amount === '' && !pickerAdds.some((row) => row.productId === item.productId),
+  );
+  const shortList = [...stockPool]
+    .sort((left, right) => label(left, ui.language).localeCompare(label(right, ui.language)))
+    .slice(0, 8);
+
+  const pickerOffers = stockPool
+    .filter((item) => {
+      const needle = addQuery.trim().toLowerCase();
+      if (needle.length < 2) return false;
+      return [item.sku, item.nameAr, item.nameEn, item.genericName ?? ''].some((value) => value.toLowerCase().includes(needle));
+    })
+    .slice(0, 12);
+
+  const lineOffers = (board.data?.items ?? [])
+    .filter((item) => (item.qty ?? 0) > 0 && item.amount === '' && !pendingAdds.some((row) => row.productId === item.productId) && !pickerAdds.some((row) => row.productId === item.productId))
+    .filter((item) => {
+      const needle = addQuery.trim().toLowerCase();
+      if (needle.length < 1) return false;
+      return [item.sku, item.nameAr, item.nameEn, item.genericName ?? ''].some((value) => value.toLowerCase().includes(needle));
+    })
+    .slice(0, 8);
+
+  function placeLine(item: PriceBoard['items'][number]) {
+    const listed = item.listedPrice && item.listedPrice !== '0.00' ? item.listedPrice : '';
+    setPendingAdds((rows) => [
+      { productId: item.productId, sku: item.sku, nameAr: item.nameAr, nameEn: item.nameEn, amount: listed },
+      ...rows,
+    ]);
+    setAddQuery('');
+  }
+
+  function placePicker(item: PriceBoard['items'][number]) {
+    const listed = item.listedPrice && item.listedPrice !== '0.00' ? item.listedPrice : '';
+    setPickerAdds((rows) => {
+      if (rows.some((row) => row.productId === item.productId)) return rows;
+      return [{ productId: item.productId, sku: item.sku, nameAr: item.nameAr, nameEn: item.nameEn, amount: listed }, ...rows];
+    });
+    setAddQuery('');
   }
 
   async function run(action: () => Promise<void>) {
@@ -3495,78 +3703,146 @@ export function PricesPage() {
       await action();
       setTick((value) => value + 1);
     } catch (caught: unknown) {
-      setNote(caught instanceof Error ? caught.message : t('empty'));
+      setNote(formatUserError(caught, t('apiError')));
     }
   }
 
+  const approvedRate = (rates.data ?? []).find((row) => !row.status || row.status === 'APPROVED');
+  const pendingRate = (rates.data ?? []).find((row) => row.status === 'PENDING');
+
   return (
     <Page title={t('prices')} error={note || board.error}>
-      <ol className="price-steps">
-        <li className="on">{t('priceFlow1')}</li>
-        <li className={selected ? 'on' : ''}>{t('priceFlow2')}</li>
-        <li className={selected?.status === 'ACTIVE' ? 'done' : ''}>{t('priceFlow3')}</li>
-      </ol>
-      <p className="lede">{t('priceFlowBody')}</p>
-      <p className="lede">{t('priceDateRule')}</p>
-      <p className="lede">{t('priceHelp')}</p>
-      <div className="row">
+      <div className="price-desk">
+      {(approvedRate || pendingRate || ratePlan) ? (
+        <div className="price-rate-cards">
+          <article className="price-rate-card">
+            <span>{t('approvedRate')}</span>
+            <strong>{approvedRate?.rate ?? '—'}</strong>
+            <small>{t('sdg')} / USD</small>
+          </article>
+          <article className="price-rate-card watch">
+            <span>{t('statusPending')}</span>
+            <strong>{pendingRate?.rate ?? ratePlan?.newRate ?? '—'}</strong>
+            <small>{ratePlan?.changePct ? `${ratePlan.changePct}%` : t('priceRateHint')}</small>
+          </article>
+          {selected && selected.status === 'SCHEDULED' && selected.effectiveFrom ? (
+            <article className="price-rate-card info">
+              <span>{t('statusScheduled')}</span>
+              <strong>{listDay(selected.effectiveFrom)}</strong>
+              <small>{label(selected, ui.language)}</small>
+            </article>
+          ) : null}
+        </div>
+      ) : null}
+      <div className="price-head">
+        <div>
+          <h2>{selected ? label(selected, ui.language) : t('prices')}</h2>
+          {selected ? (
+            <p className="lede">
+              {selected.status === 'ACTIVE' ? t('statusActive') : selected.status === 'ARCHIVED' ? t('statusArchived') : selected.status === 'PENDING' ? t('statusPending') : selected.status === 'SCHEDULED' ? t('statusScheduled') : selected.status === 'REJECTED' ? t('statusRejected') : t('statusDraft')}
+              {' · '}
+              {t('versionLabel')} {selected.versionNo ?? 1}
+              {selected.sourceNameAr
+                ? ` · ${t('sourceList')} ${ui.language.startsWith('ar') ? selected.sourceNameAr : selected.sourceNameEn}`
+                : ''}
+            </p>
+          ) : null}
+        </div>
         <button
-          className="primary fit"
+          className="primary fit price-new"
           type="button"
           onClick={() => {
             setComposer('create');
-            setPriceStep(1);
-            setFinder('');
-            setChosen([]);
             setNames({ nameAr: '', nameEn: '' });
-            setEffectiveOn('');
+            setEffectiveOn(khartoumToday());
           }}
         >
           {t('newPriceList')}
         </button>
-        {selected && !selected.locked ? (
-          <button
-            className="ghost"
-            type="button"
-            onClick={() => {
-              setComposer('add');
-              setPriceStep(2);
-              setFinder('');
-              setChosen(stockOffers('add'));
-            }}
-          >
-            {t('addMedicines')}
-          </button>
-        ) : null}
       </div>
-      <p className="lede">{board.data?.using === 'BRANCH' ? t('usingBranch') : t('usingShared')}</p>
-      {board.data && board.data.lists.length > 0 ? (
+      <aside className="price-rail">
+        <section className="price-now">
+          <span className="chip">{t('priceSellingNow')}</span>
+          <p className="lede">{t('priceOneSelling')}</p>
+          {selling ? (
+            <>
+              <h2>{label(selling, ui.language)}</h2>
+              <p>
+                {t('effectiveOn')} {listDay(selling.effectiveFrom) || sellingOn || '—'} · {t('versionLabel')} {selling.versionNo ?? 1}
+              </p>
+              <p>{board.data?.using === 'BRANCH' ? t('usingBranch') : t('usingShared')}</p>
+              {selling.allowedActions?.includes('renew') ? (
+                <button className="primary fit" type="button" onClick={() => beginRenew(selling)}>
+                  {t('renewList')}
+                </button>
+              ) : null}
+            </>
+          ) : (
+            <p>{t('noPrices')}</p>
+          )}
+        </section>
+        <h3>{t('priceAll')}</h3>
         <label className="field">
-          <span>{t('prices')}</span>
-          <select value={listId || board.data.selectedId || ''} onChange={(event) => setListId(event.target.value)}>
-            {board.data.lists.map((list) => (
-              <option key={list.id} value={list.id}>
-                {label(list, ui.language)} · {list.status ?? ''} v{list.versionNo ?? 1}
-                {list.scope === 'BRANCH' ? ` · ${ui.language.startsWith('ar') ? list.branchAr : list.branchEn}` : ''}
-              </option>
-            ))}
-          </select>
+          <span>{t('priceListSearch')}</span>
+          <input
+            value={listQuery}
+            placeholder={t('priceListSearch')}
+            onChange={(event) => setListQuery(event.target.value)}
+          />
         </label>
-      ) : null}
+        {!listNeedle ? <p className="lede">{t('priceListRecent')}</p> : null}
+        {listNeedle && railLists.length === 0 ? <p className="lede">{t('empty')}</p> : null}
+        {railLists.map((list) => (
+          <button
+            key={list.id}
+            type="button"
+            className={['price-row', list.id === sellingId ? 'active' : '', selected?.id === list.id ? 'on' : ''].filter(Boolean).join(' ')}
+            onClick={() => setListId(list.id)}
+          >
+            <strong>{label(list, ui.language)}</strong>
+            <small>
+              {listStatus(list)} · {t('versionLabel')} {list.versionNo ?? 1}
+              {list.effectiveFrom ? ` · ${listDay(list.effectiveFrom)}` : ''}
+              {list.scope === 'BRANCH' ? ` · ${ui.language.startsWith('ar') ? list.branchAr : list.branchEn}` : ''}
+            </small>
+          </button>
+        ))}
+        <p className="lede">{t('priceDateRule')}</p>
+      </aside>
+      <div className="price-work">
       {selected ? (
         <div className="panel-card">
-          <h2>{t('priceOps')}</h2>
-          <p className="lede">
-            {selected.status === 'ACTIVE' ? t('statusActive') : selected.status === 'ARCHIVED' ? t('statusArchived') : selected.status === 'PENDING' ? t('statusPending') : selected.status === 'SCHEDULED' ? t('statusScheduled') : selected.status === 'REJECTED' ? t('statusRejected') : t('statusDraft')}
-            {' · '}
-            {t('versionLabel')} {selected.versionNo ?? 1}
-            {selected.effectiveFrom
-              ? ` · ${t('effectiveOn')} ${new Date(selected.effectiveFrom).toLocaleDateString('en-CA', { timeZone: 'Africa/Khartoum' })}`
-              : ''}
-            {selected.sourceNameAr
-              ? ` · ${t('sourceList')} ${ui.language.startsWith('ar') ? selected.sourceNameAr : selected.sourceNameEn}`
-              : ''}
-          </p>
+          <label className="field price-date">
+            <span>{t('effectiveOn')}</span>
+            <input
+              type="date"
+              value={dateDraft}
+              min={today}
+              disabled={selected.status === 'ARCHIVED'}
+              onChange={(event) => setDateDraft(event.target.value)}
+            />
+          </label>
+          {selected.status !== 'ARCHIVED' && /^\d{4}-\d{2}-\d{2}$/.test(dateDraft) && dateDraft < today ? (
+            <small>{t('priceDateRule')}</small>
+          ) : null}
+          {selected.status !== 'ARCHIVED' && dateDraft !== listDay(selected.effectiveFrom) ? (
+            <button
+              className="primary fit"
+              type="button"
+              disabled={!/^\d{4}-\d{2}-\d{2}$/.test(dateDraft) || dateDraft < today}
+              onClick={() =>
+                void run(async () => {
+                  await api('/api/v1/ops/prices/effective', {
+                    method: 'POST',
+                    body: JSON.stringify({ priceListId: selected.id, effectiveFrom: dateDraft }),
+                  });
+                  ui.push({ tone: 'info', title: t('saved'), body: t('effectiveOn') });
+                })
+              }
+            >
+              {t('saveDate')}
+            </button>
+          ) : null}
           {selected.lockReason === 'usedOnSales' ? <p className="lede">{t('lockUsed')}</p> : null}
           {selected.lockReason === 'active' ? <p className="lede">{t('lockActive')}</p> : null}
           <div className="row">
@@ -3646,15 +3922,7 @@ export function PricesPage() {
               <button
                 className="primary fit"
                 type="button"
-                onClick={() => {
-                  setAdjust('SAME');
-                  setAdjustValue('10');
-                  setNames({ nameAr: `${selected.nameAr} نسخة`, nameEn: `${selected.nameEn} copy` });
-                  setPriceStep(1);
-                  setFinder('');
-                  setChosen([]);
-                  setComposer('renew');
-                }}
+                onClick={() => beginRenew(selected)}
               >
                 {t('renewList')}
               </button>
@@ -3662,8 +3930,58 @@ export function PricesPage() {
           ) : null}
         </div>
       ) : null}
+      {selected ? (
+        <div className="price-add">
+          <h3>{t('addMedicines')}</h3>
+          {selected.locked ? (
+            <>
+              <p className="lede">{t('priceAddLocked')}</p>
+              {selected.allowedActions?.includes('renew') ? (
+                <button className="primary fit" type="button" onClick={() => beginRenew(selected)}>
+                  {t('renewList')}
+                </button>
+              ) : null}
+            </>
+          ) : (
+            <>
+              <label className="field">
+                <span>{t('searchMedicines')}</span>
+                <input
+                  value={addQuery}
+                  placeholder={t('searchMedicines')}
+                  onChange={(event) => setAddQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' && lineOffers[0]) {
+                      event.preventDefault();
+                      placeLine(lineOffers[0]);
+                    }
+                  }}
+                />
+              </label>
+              <p className="lede">{t('priceAddStock')}</p>
+              <p className="lede">{t('priceAddHint')}</p>
+              {addQuery.trim() !== '' ? (
+                <div className="price-hits">
+                  {lineOffers.map((item) => (
+                    <button key={item.productId} type="button" onClick={() => placeLine(item)}>
+                      <strong>{label(item, ui.language)}</strong>
+                      <small>
+                        {item.sku}
+                        {(item.qty ?? 0) > 0 ? ` · ${t('entryInStock')} ${showCount(item.qty ?? 0, ui.language)}` : ''}
+                        {item.listedPrice && item.listedPrice !== '0.00' ? ` · ${t('priceCurrent')} ${item.listedPrice}` : ''}
+                      </small>
+                    </button>
+                  ))}
+                  {lineOffers.length === 0 ? <p className="lede">{t('priceNoneStock')}</p> : null}
+                </div>
+              ) : null}
+            </>
+          )}
+        </div>
+      ) : null}
       {selected && !selected.locked ? (
-        <div className="panel-card">
+        <details className="price-more">
+          <summary>{t('priceMore')}</summary>
           <h2>{t('bulk')}</h2>
           <div className="form-grid">
             <label className="field">
@@ -3763,10 +4081,10 @@ export function PricesPage() {
           >
             {t('importCsv')}
           </button>
-        </div>
+        </details>
       ) : null}
-      <div className="panel-card">
-        <h2>{t('rate')}</h2>
+      <details className="price-more">
+        <summary>{t('rate')}</summary>
         <p className="lede">{t('approvedRate')}: {(rates.data ?? []).find((row) => !row.status || row.status === 'APPROVED')?.rate ?? '—'}</p>
         <div className="row">
           <Field label={t('newRate')} value={rate} onChange={setRate} />
@@ -3784,6 +4102,7 @@ export function PricesPage() {
                   rows: { sku: string; nameAr: string; nameEn: string; oldPrice: string; newPrice: string; changePct: string }[];
                 }>('/api/v1/ops/prices/rates/propose', { method: 'POST', body: JSON.stringify({ rate, action: 'preview' }) });
                 setRatePlan(plan);
+                setRateEffective(khartoumToday());
                 setRateOpen(true);
               })
             }
@@ -3791,7 +4110,7 @@ export function PricesPage() {
             {t('changeRate')}
           </button>
         </div>
-      </div>
+      </details>
       {rateOpen && ratePlan ? (
         <div className="modal-back" onClick={() => setRateOpen(false)}>
           <form className="modal pack-modal" onClick={(event) => event.stopPropagation()} onSubmit={(event) => event.preventDefault()}>
@@ -3799,6 +4118,7 @@ export function PricesPage() {
               <h2>{t('changeRate')}</h2>
               <button className="ghost" type="button" onClick={() => setRateOpen(false)}>{t('entryClose')}</button>
             </div>
+            <p className="lede">{t('rateChoice')}</p>
             <p className="lede">{t('oldRate')} {ratePlan.oldRate} · {t('newRate')} {ratePlan.newRate} · {ratePlan.changePct}%</p>
             <div className="sheet">
               <table>
@@ -3822,38 +4142,26 @@ export function PricesPage() {
                 </tbody>
               </table>
             </div>
-            <div className="entry-money">
-              <label className="field">
-                <span>{t('rejectReason')}</span>
-                <input value={rateReason} onChange={(event) => setRateReason(event.target.value)} />
-              </label>
-              <label className="field">
-                <span>{t('effectiveOn')}</span>
-                <input type="date" value={rateEffective} onChange={(event) => setRateEffective(event.target.value)} />
-              </label>
-            </div>
+            <label className="field">
+              <span>{t('effectiveOn')}</span>
+              <input type="date" value={rateEffective} min={today} onChange={(event) => setRateEffective(event.target.value)} />
+            </label>
+            {rateEffective !== '' && rateEffective < today ? <small>{t('priceDateRule')}</small> : null}
             <div className="row">
-              <button className="ghost" type="button" onClick={() => void run(async () => {
+              <button className="primary fit" type="button" disabled={rateEffective !== '' && rateEffective < today} onClick={() => void run(async () => {
                 const saved = await api<{ proposalId?: string; status: string }>('/api/v1/ops/prices/rates/propose', { method: 'POST', body: JSON.stringify({ rate: ratePlan.newRate, action: 'draft', effectiveOn: rateEffective || undefined }) });
-                setRatePlan({ ...ratePlan, proposalId: saved.proposalId, status: saved.status });
-                ui.push({ tone: 'info', title: t('saved'), body: t('saveDraft') });
-              })}>{t('saveDraft')}</button>
-              <button className="ghost" type="button" disabled={!ratePlan.proposalId || rateReason.trim().length < 3} onClick={() => void run(async () => {
-                await api('/api/v1/ops/prices/rates/propose', { method: 'POST', body: JSON.stringify({ rate: ratePlan.newRate, action: 'reject', proposalId: ratePlan.proposalId, reason: rateReason.trim() }) });
                 setRateOpen(false);
-                ui.push({ tone: 'info', title: t('rejected'), body: rateReason.trim() });
-              })}>{t('rejectRate')}</button>
+                setRate('');
+                if (saved.proposalId) setListId(saved.proposalId);
+                ui.push({ tone: 'info', title: t('saved'), body: t('rateApplyList') });
+              })}>{t('rateApplyList')}</button>
               <button className="ghost" type="button" onClick={() => void run(async () => {
-                const saved = await api<{ proposalId?: string; status: string }>('/api/v1/ops/prices/rates/propose', { method: 'POST', body: JSON.stringify({ rate: ratePlan.newRate, action: 'submit', effectiveOn: rateEffective || undefined }) });
-                setRatePlan({ ...ratePlan, proposalId: saved.proposalId, status: saved.status });
-                ui.push({ tone: 'info', title: t('submitted'), body: t('rate') });
-              })}>{t('submitRate')}</button>
-              <button className="primary fit" type="button" disabled={!ratePlan.proposalId} onClick={() => void run(async () => {
-                await api('/api/v1/ops/prices/rates/propose', { method: 'POST', body: JSON.stringify({ rate: ratePlan.newRate, action: 'approve', proposalId: ratePlan.proposalId, effectiveOn: rateEffective || undefined }) });
+                await api('/api/v1/ops/prices/rates/propose', { method: 'POST', body: JSON.stringify({ rate: ratePlan.newRate, action: 'rate' }) });
                 setRateOpen(false);
-                setTick((value) => value + 1);
-                ui.push({ tone: 'info', title: t('approved'), body: t('rate') });
-              })}>{t('approveRate')}</button>
+                setRate('');
+                ui.push({ tone: 'info', title: t('saved'), body: t('rateOnly') });
+              })}>{t('rateOnly')}</button>
+              <button className="ghost" type="button" onClick={() => setRateOpen(false)}>{t('close')}</button>
             </div>
           </form>
         </div>
@@ -3870,10 +4178,39 @@ export function PricesPage() {
             <tr>
               <th>{t('product')}</th>
               <th>{t('sku')}</th>
-              <th>{t('price')}</th>
+              <th>{t('containerPrice')}</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
+            {pendingAdds
+              .filter((item) => {
+                const needle = itemQuery.trim().toLowerCase();
+                if (!needle) return true;
+                return [item.sku, item.nameAr, item.nameEn].some((value) => value.toLowerCase().includes(needle));
+              })
+              .map((item) => (
+              <tr key={item.productId} className="price-new">
+                <td>{label(item, ui.language)}</td>
+                <td>{item.sku}</td>
+                <td>
+                  <input
+                    value={item.amount}
+                    inputMode="decimal"
+                    placeholder="0.00"
+                    aria-label={`${t('containerPrice')} ${label(item, ui.language)}`}
+                    onChange={(event) =>
+                      setPendingAdds(pendingAdds.map((row) => (row.productId === item.productId ? { ...row, amount: event.target.value } : row)))
+                    }
+                  />
+                </td>
+                <td>
+                  <button className="ghost" type="button" onClick={() => setPendingAdds(pendingAdds.filter((row) => row.productId !== item.productId))}>
+                    {t('removeLine')}
+                  </button>
+                </td>
+              </tr>
+            ))}
             {(board.data?.items ?? [])
               .filter((item) => item.amount !== '')
               .filter((item) => {
@@ -3881,10 +4218,9 @@ export function PricesPage() {
                 if (!needle) return true;
                 return [item.sku, item.nameAr, item.nameEn].some((value) => value.toLowerCase().includes(needle));
               })
-              .slice(0, 20)
               .map((item) => (
               <tr key={item.productId}>
-                <td>{ui.language.startsWith('ar') ? item.nameAr : item.nameEn}</td>
+                <td>{label(item, ui.language)}</td>
                 <td>{item.sku}</td>
                 <td>
                   <input
@@ -3893,6 +4229,7 @@ export function PricesPage() {
                     onChange={(event) => setAmounts({ ...amounts, [item.productId]: event.target.value })}
                   />
                 </td>
+                <td></td>
               </tr>
             ))}
           </tbody>
@@ -3903,16 +4240,23 @@ export function PricesPage() {
           <button
             className="primary fit"
             type="button"
-            disabled={!dirtyPrices(board.data?.items ?? [], amounts)}
+            disabled={
+              pendingAdds.some((row) => !/^\d+(\.\d{1,2})?$/.test(row.amount)) ||
+              (pendingAdds.length === 0 && !dirtyPrices(board.data?.items ?? [], amounts))
+            }
             onClick={() =>
               void run(async () => {
                 const priceListId = listId || board.data?.selectedId;
                 if (!priceListId) return;
-                const items = changedPrices(board.data?.items ?? [], amounts);
+                const items = [
+                  ...changedPrices(board.data?.items ?? [], amounts),
+                  ...pendingAdds.map((row) => ({ code: row.sku, amount: row.amount })),
+                ];
                 await api('/api/v1/ops/prices/items/batch', {
                   method: 'PUT',
                   body: JSON.stringify({ priceListId, items }),
                 });
+                setPendingAdds([]);
                 ui.push({ tone: 'info', title: t('saved'), body: t('savePrices') });
               })
             }
@@ -3921,19 +4265,191 @@ export function PricesPage() {
           </button>
         </div>
       ) : null}
-      {board.data && board.data.items.every((item) => item.amount === '') ? <p className="lede">{t('noPrices')}</p> : null}
+      {selected && !selected.locked ? (
+        <div className="panel-card">
+          <h3>{t('priceLinkBranch')}</h3>
+          {(board.data?.items ?? []).some((item) => item.amount !== '') ? (
+            <>
+              <p className="lede">{t('priceLinkHint')}</p>
+              {selected.branchId ? (
+                <p className="lede">{t('usingBranch')}: {ui.language.startsWith('ar') ? selected.branchAr : selected.branchEn || selected.branchAr}</p>
+              ) : null}
+              <div className="row">
+                <label className="field">
+                  <span>{t('branches')}</span>
+                  <select value={linkBranch} onChange={(event) => setLinkBranch(event.target.value)}>
+                    <option value="" />
+                    {(network.data?.branches ?? []).map((branch) => (
+                      <option key={branch.id} value={branch.id}>
+                        {ui.language.startsWith('ar') ? branch.nameAr : branch.nameEn || branch.nameAr}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  className="primary fit"
+                  type="button"
+                  disabled={linkBranch === ''}
+                  onClick={() =>
+                    void run(async () => {
+                      await api('/api/v1/ops/prices/link', {
+                        method: 'POST',
+                        body: JSON.stringify({ priceListId: selected.id, branchId: linkBranch }),
+                      });
+                      ui.push({ tone: 'info', title: t('saved'), body: t('priceLinkBranch') });
+                    })
+                  }
+                >
+                  {t('priceLinkBranch')}
+                </button>
+              </div>
+            </>
+          ) : (
+            <p className="lede">{t('priceLinkAfter')}</p>
+          )}
+        </div>
+      ) : null}
+      {board.data && board.data.items.every((item) => item.amount === '') && pendingAdds.length === 0 ? <p className="lede">{t('noPrices')}</p> : null}
+      </div>
+      </div>
+      {pickerOpen && selected && selected.id === pickerListId && !selected.locked ? (
+        <div className="modal-back" role="presentation" onClick={() => setPickerOpen(false)}>
+          <div className="modal pack-modal entry-modal price-pick-modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+            <div className="pack-scroll price-pick-scroll">
+              <div className="entry-top">
+                <h2>{t('pricePickTitle', { name: label(selected, ui.language) })}</h2>
+                <button className="ghost" type="button" onClick={() => setPickerOpen(false)}>
+                  {t('close')}
+                </button>
+              </div>
+              <p className="lede">{t('priceAddStock')}</p>
+              <label className="field">
+                <span>{t('searchMedicines')}</span>
+                <input
+                  value={addQuery}
+                  placeholder={t('searchMedicines')}
+                  autoFocus
+                  onChange={(event) => setAddQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    const needle = addQuery.trim();
+                    const hit = needle.length >= 2 ? pickerOffers[0] : needle ? null : shortList[0];
+                    if (event.key === 'Enter' && hit) {
+                      event.preventDefault();
+                      placePicker(hit);
+                    }
+                  }}
+                />
+              </label>
+              <section className="price-pick-find">
+                <p className="lede">
+                  {addQuery.trim().length >= 2
+                    ? t('searchMedicines')
+                    : addQuery.trim()
+                      ? t('typeToSearch')
+                      : t('priceShortList')}
+                </p>
+                <div className="pick-list">
+                  {(addQuery.trim().length >= 2 ? pickerOffers : addQuery.trim() ? [] : shortList).map((item) => (
+                    <div className="pick-row" key={item.productId}>
+                      <div className="pick-name">
+                        <strong>{label(item, ui.language)}</strong>
+                        <small>
+                          {item.sku} · {t('entryInStock')} {showCount(item.qty ?? 0, ui.language)}
+                          {item.listedPrice && item.listedPrice !== '0.00' ? ` · ${t('priceCurrent')} ${item.listedPrice}` : ''}
+                        </small>
+                      </div>
+                      <button
+                        type="button"
+                        className="plus-btn"
+                        aria-label={`${t('pricePickAdd')} ${label(item, ui.language)}`}
+                        onClick={() => placePicker(item)}
+                      >
+                        +
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                {addQuery.trim().length >= 2 && pickerOffers.length === 0 ? <p className="lede">{t('priceNoneStock')}</p> : null}
+              </section>
+              <section className="price-pick-added">
+                <h3>
+                  {t('addedItems')}
+                  {pickerAdds.length > 0 ? ` · ${showCount(pickerAdds.length, ui.language)}` : ''}
+                </h3>
+                <div className="chosen">
+                  {pickerAdds.length > 0 ? (
+                    <>
+                      <div className="chosen-head">
+                        <span>{t('product')}</span>
+                        <span>{t('containerPrice')}</span>
+                        <span aria-hidden="true" />
+                      </div>
+                      {pickerAdds.map((item) => (
+                        <div className="chosen-row" key={item.productId}>
+                          <div className="pick-name">
+                            <strong>{label(item, ui.language)}</strong>
+                            <small>{item.sku}</small>
+                          </div>
+                          <input
+                            value={item.amount}
+                            inputMode="decimal"
+                            placeholder="0.00"
+                            aria-label={`${t('containerPrice')} ${label(item, ui.language)}`}
+                            onChange={(event) =>
+                              setPickerAdds((rows) => rows.map((row) => (row.productId === item.productId ? { ...row, amount: event.target.value } : row)))
+                            }
+                          />
+                          <button
+                            type="button"
+                            className="chosen-x"
+                            aria-label={`${t('removeLine')} ${label(item, ui.language)}`}
+                            onClick={() => setPickerAdds((rows) => rows.filter((row) => row.productId !== item.productId))}
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                    </>
+                  ) : (
+                    <p className="lede chosen-empty">{t('pricePickEmpty')}</p>
+                  )}
+                </div>
+              </section>
+            </div>
+            <div className="pack-bar">
+              <p className="pack-total">{t('pricePickCount', { count: showCount(pickerAdds.length, ui.language) })}</p>
+              <button
+                className="primary fit"
+                type="button"
+                disabled={pickerAdds.length === 0 || pickerAdds.some((row) => !/^\d+(\.\d{1,2})?$/.test(row.amount))}
+                onClick={() =>
+                  void run(async () => {
+                    await api('/api/v1/ops/prices/items/batch', {
+                      method: 'PUT',
+                      body: JSON.stringify({
+                        priceListId: selected.id,
+                        items: pickerAdds.map((row) => ({ code: row.sku, amount: row.amount })),
+                      }),
+                    });
+                    setPickerAdds([]);
+                    setPickerOpen(false);
+                    ui.push({ tone: 'info', title: t('saved'), body: t('savePrices') });
+                  })
+                }
+              >
+                {t('savePrices')}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {composer ? (
         <div className="modal-back" role="presentation" onClick={() => setComposer(null)}>
           <div className="modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
-            <h2>{composer === 'create' ? t('newPriceList') : composer === 'renew' ? t('renewList') : t('addMedicines')}</h2>
-            {composer === 'create' || composer === 'renew' ? (
-              <ol className="price-steps">
-                <li className={priceStep === 1 ? 'on' : 'done'}>{composer === 'renew' ? t('priceRenewStart') : t('priceStepDetails')}</li>
-                <li className={priceStep === 2 ? 'on' : ''}>{composer === 'renew' ? t('priceRenewReview') : t('priceStepItems')}</li>
-              </ol>
-            ) : null}
-            {composer === 'create' && priceStep === 1 ? (
+            <h2>{composer === 'create' ? t('newPriceList') : t('renewList')}</h2>
+            {composer === 'create' ? (
               <>
+                <p className="lede">{t('priceDateRule')}</p>
                 <div className="modal-fields">
                   <Field label={t('nameAr')} value={names.nameAr} onChange={(nameAr) => setNames({ ...names, nameAr })} />
                   <Field label={t('nameEn')} value={names.nameEn} onChange={(nameEn) => setNames({ ...names, nameEn })} />
@@ -3942,40 +4458,66 @@ export function PricesPage() {
                     <input
                       type="date"
                       value={effectiveOn}
-                      min={sellingOn ? dayAfter(sellingOn) : undefined}
+                      min={today}
                       onChange={(event) => setEffectiveOn(event.target.value)}
                       required
                     />
-                    {dateBlocked ? <small>{t('priceDateRule')}</small> : null}
+                    {backDate ? <small>{t('priceDateRule')}</small> : null}
                   </label>
                 </div>
                 <div className="row">
                   <button
                     className="primary fit"
                     type="button"
-                    disabled={names.nameAr.trim() === '' || names.nameEn.trim() === '' || !/^\d{4}-\d{2}-\d{2}$/.test(effectiveOn) || dateBlocked}
-                    onClick={() => {
-                      setChosen(stockOffers('create'));
-                      setFinder('');
-                      setPriceStep(2);
-                    }}
+                    disabled={names.nameAr.trim() === '' || names.nameEn.trim() === '' || !/^\d{4}-\d{2}-\d{2}$/.test(effectiveOn) || backDate}
+                    onClick={() =>
+                      void run(async () => {
+                        const created = await api<{ id: string }>('/api/v1/ops/prices/lists', {
+                          method: 'POST',
+                          body: JSON.stringify({
+                            nameAr: names.nameAr,
+                            nameEn: names.nameEn,
+                            scope: 'PHARMACY',
+                            effectiveFrom: effectiveOn,
+                            items: [],
+                          }),
+                        });
+                        setListId(created.id);
+                        setPickerAdds([]);
+                        setAddQuery('');
+                        setPickerListId(created.id);
+                        setPickerOpen(true);
+                        setComposer(null);
+                        ui.push({ tone: 'info', title: t('saved'), body: names.nameAr });
+                      })
+                    }
                   >
-                    {t('nextStep')}
+                    {t('createList')}
                   </button>
                   <button className="ghost" type="button" onClick={() => setComposer(null)}>
                     {t('close')}
                   </button>
                 </div>
               </>
-            ) : null}
-            {composer === 'renew' && priceStep === 1 ? (
+            ) : (
               <>
-                <p className="lede">{t('priceDateRule')}</p>
+                <p className="lede">{t('priceRenewDate')}</p>
                 <p className="lede">{t('priceRenewStartBody')}</p>
                 <div className="modal-fields">
                   <Field label={t('nameAr')} value={names.nameAr} onChange={(nameAr) => setNames({ ...names, nameAr })} />
                   <Field label={t('nameEn')} value={names.nameEn} onChange={(nameEn) => setNames({ ...names, nameEn })} />
-                  {copyNameTaken ? <p className="lede">{t('priceDateRule')}</p> : null}
+                  <label className="field span-2">
+                    <span>{t('effectiveOn')}</span>
+                    <input
+                      type="date"
+                      value={effectiveOn}
+                      min={today}
+                      onChange={(event) => setEffectiveOn(event.target.value)}
+                      required
+                    />
+                    {backDate ? <small>{t('priceDateRule')}</small> : null}
+                  </label>
+                  {copyNameTaken ? <p className="lede">{t('priceCopyName')}</p> : null}
                   <label className="field span-2">
                     <span>{t('renewList')}</span>
                     <select value={adjust} onChange={(event) => setAdjust(event.target.value as 'SAME' | 'PCT' | 'AMOUNT')}>
@@ -3991,188 +4533,43 @@ export function PricesPage() {
                     className="primary fit"
                     type="button"
                     disabled={
+                      !selected ||
                       names.nameAr.trim() === '' ||
                       names.nameEn.trim() === '' ||
                       copyNameTaken ||
+                      !/^\d{4}-\d{2}-\d{2}$/.test(effectiveOn) ||
+                      backDate ||
                       (adjust !== 'SAME' && !/^-?\d+(\.\d{1,2})?$/.test(adjustValue.trim()))
                     }
-                    onClick={() => {
-                      const priced = new Set((board.data?.items ?? []).filter((item) => item.amount !== '').map((item) => item.sku));
-                      const current: PricePick[] = (board.data?.items ?? [])
-                        .filter((item) => item.amount !== '')
-                        .map((item) => ({
-                          code: item.sku,
-                          name: label({ nameAr: item.nameAr, nameEn: item.nameEn }, ui.language),
-                          amount: previewPrice(item.amount, adjust, adjust === 'SAME' ? '0' : adjustValue),
-                          selected: true,
-                          stockPrice: item.amount,
-                          qty: item.qty ?? 0,
-                          fresh: false,
-                        }));
-                      const extras = (board.data?.items ?? [])
-                        .filter((item) => (item.qty ?? 0) > 0 && !priced.has(item.sku))
-                        .map((item) => {
-                          const stockPrice = item.listedPrice && item.listedPrice !== '0.00' ? item.listedPrice : '';
-                          return {
-                            code: item.sku,
-                            name: label({ nameAr: item.nameAr, nameEn: item.nameEn }, ui.language),
-                            amount: stockPrice,
-                            selected: false,
-                            stockPrice,
-                            qty: item.qty ?? 0,
-                            fresh: true,
-                          };
+                    onClick={() =>
+                      void run(async () => {
+                        if (!selected) return;
+                        const created = await api<{ id: string }>('/api/v1/ops/prices/copy', {
+                          method: 'POST',
+                          body: JSON.stringify({
+                            priceListId: selected.id,
+                            adjust,
+                            value: adjust === 'SAME' ? '0.00' : adjustValue.trim(),
+                            nameAr: names.nameAr.trim(),
+                            nameEn: names.nameEn.trim(),
+                            effectiveFrom: effectiveOn,
+                          }),
                         });
-                      setChosen([...current, ...extras]);
-                      setFinder('');
-                      setPriceStep(2);
-                    }}
+                        setListId(created.id);
+                        setAdjust('SAME');
+                        setComposer(null);
+                        ui.push({ tone: 'info', title: t('saved'), body: t('renewList') });
+                      })
+                    }
                   >
-                    {t('nextStep')}
+                    {t('renewList')}
                   </button>
                   <button className="ghost" type="button" onClick={() => setComposer(null)}>
                     {t('close')}
                   </button>
                 </div>
               </>
-            ) : null}
-            {priceStep === 2 ? (
-            <>
-            <p className="lede">{composer === 'create' ? t('priceHold') : composer === 'renew' ? t('priceRenewReviewBody') : t('addAfterSave')}</p>
-            <label className="field">
-              <span>{t('searchMedicines')}</span>
-              <input value={finder} onChange={(event) => setFinder(event.target.value)} />
-            </label>
-            <div className="row">
-              <button className="ghost" type="button" onClick={() => setChosen(chosen.map((row) => ({ ...row, selected: true })))}>
-                {t('priceSelectAll')}
-              </button>
-              <button className="ghost" type="button" onClick={() => setChosen(chosen.map((row) => ({ ...row, selected: false })))}>
-                {t('priceClear')}
-              </button>
-            </div>
-            <div className="pick-list">
-              {chosen
-                .filter((row) => {
-                  const needle = finder.trim().toLowerCase();
-                  return needle === '' || row.name.toLowerCase().includes(needle) || row.code.toLowerCase().includes(needle);
-                })
-                .map((row) => (
-                  <div className="chosen-row" key={row.code}>
-                    <label className="pick-name price-pick">
-                      <input
-                        type="checkbox"
-                        checked={row.selected}
-                        onChange={(event) =>
-                          setChosen(chosen.map((item) => (item.code === row.code ? { ...item, selected: event.target.checked } : item)))
-                        }
-                      />
-                      <span>
-                        <strong>{row.name}</strong>
-                        <small>
-                          {row.fresh === false
-                            ? `${t('priceOnList')}${row.stockPrice ? ` · ${t('priceCurrent')} ${row.stockPrice}` : ''}`
-                            : `${t('entryInStock')} · ${showCount(row.qty, ui.language)}${row.stockPrice ? ` · ${t('priceCurrent')} ${row.stockPrice}` : ''}`}
-                        </small>
-                      </span>
-                    </label>
-                    <input
-                      value={row.amount}
-                      inputMode="decimal"
-                      placeholder="0.00"
-                      disabled={!row.selected}
-                      aria-label={`${t('price')} ${row.name}`}
-                      onChange={(event) =>
-                        setChosen(chosen.map((item) => (item.code === row.code ? { ...item, amount: event.target.value } : item)))
-                      }
-                    />
-                  </div>
-                ))}
-            </div>
-            {chosen.length === 0 ? <p className="lede">{t('priceNoneStock')}</p> : null}
-            {finder.trim() !== '' && chosen.every((row) => !row.name.toLowerCase().includes(finder.trim().toLowerCase()) && !row.code.toLowerCase().includes(finder.trim().toLowerCase())) ? (
-              <p className="lede">{t('priceNoneStock')}</p>
-            ) : null}
-            <div className="row">
-              <button
-                className="primary fit"
-                type="button"
-                disabled={
-                  (composer !== 'renew' && !chosen.some((row) => row.selected)) ||
-                  chosen.some((row) => row.selected && !/^\d+(\.\d{1,2})?$/.test(row.amount)) ||
-                  (composer === 'create' && (names.nameAr.trim() === '' || names.nameEn.trim() === '' || !/^\d{4}-\d{2}-\d{2}$/.test(effectiveOn) || dateBlocked)) ||
-                  (composer === 'renew' && (names.nameAr.trim() === '' || names.nameEn.trim() === '' || copyNameTaken))
-                }
-                onClick={() =>
-                  void run(async () => {
-                    const items = chosen.filter((row) => row.selected).map((row) => ({ code: row.code, amount: row.amount }));
-                    if (composer === 'renew' && selected) {
-                      const created = await api<{ id: string }>('/api/v1/ops/prices/copy', {
-                        method: 'POST',
-                        body: JSON.stringify({
-                          priceListId: selected.id,
-                          adjust,
-                          value: adjust === 'SAME' ? '0.00' : adjustValue.trim(),
-                          nameAr: names.nameAr.trim(),
-                          nameEn: names.nameEn.trim(),
-                        }),
-                      });
-                      if (items.length > 0) {
-                        await api('/api/v1/ops/prices/items/batch', {
-                          method: 'PUT',
-                          body: JSON.stringify({ priceListId: created.id, items }),
-                        });
-                      }
-                      if (selected.isActive) {
-                        await api('/api/v1/ops/prices/activate', {
-                          method: 'POST',
-                          body: JSON.stringify({ priceListId: created.id, useShared: false }),
-                        });
-                      }
-                      setListId(created.id);
-                      setAdjust('SAME');
-                    } else if (composer === 'create') {
-                      const created = await api<{ id: string }>('/api/v1/ops/prices/lists', {
-                        method: 'POST',
-                        body: JSON.stringify({
-                          nameAr: names.nameAr,
-                          nameEn: names.nameEn,
-                          scope: branchChosen ? 'BRANCH' : 'PHARMACY',
-                          effectiveFrom: effectiveOn,
-                          items,
-                        }),
-                      });
-                      setListId(created.id);
-                    } else if (selected) {
-                      await api('/api/v1/ops/prices/items/batch', {
-                        method: 'PUT',
-                        body: JSON.stringify({ priceListId: selected.id, items }),
-                      });
-                    }
-                    ui.push({
-                      tone: 'info',
-                      title: t('saved'),
-                      body: composer === 'create' ? names.nameAr : composer === 'renew' ? t('renewList') : t('addMedicines'),
-                    });
-                    setComposer(null);
-                    setChosen([]);
-                    setPriceStep(1);
-                  })
-                }
-              >
-                {composer === 'create' ? t('saveListOnce') : composer === 'renew' ? t('renewList') : t('savePrices')}
-              </button>
-              {composer === 'create' || composer === 'renew' ? (
-                <button className="ghost" type="button" onClick={() => setPriceStep(1)}>
-                  {t('back')}
-                </button>
-              ) : null}
-              <button className="ghost" type="button" onClick={() => setComposer(null)}>
-                {t('close')}
-              </button>
-            </div>
-            </>
-            ) : null}
+            )}
           </div>
         </div>
       ) : null}
@@ -4195,17 +4592,6 @@ function dirtyPrices(items: { productId: string; amount: string }[], amounts: Re
   return changedPrices(items, amounts).length > 0;
 }
 
-function previewPrice(amount: string, adjust: 'SAME' | 'PCT' | 'AMOUNT', value: string): string {
-  const base = Number(amount);
-  if (!Number.isFinite(base) || base <= 0) return amount;
-  if (adjust === 'SAME') return base.toFixed(2);
-  const delta = Number(value);
-  if (!Number.isFinite(delta)) return base.toFixed(2);
-  const next = adjust === 'PCT' ? base * (1 + delta / 100) : base + delta;
-  if (!(next > 0)) return base.toFixed(2);
-  return next.toFixed(2);
-}
-
 function Field({ label, value, onChange, optional = false }: { label: string; value: string; onChange: (value: string) => void; optional?: boolean }) {
   return (
     <label className="field">
@@ -4214,3 +4600,4 @@ function Field({ label, value, onChange, optional = false }: { label: string; va
     </label>
   );
 }
+

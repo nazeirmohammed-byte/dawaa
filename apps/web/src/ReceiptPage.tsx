@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { formatKhartoum } from './locale';
-import { api, type ReceiptPreview } from './api';
+import { api, formatUserError, type ReceiptPreview } from './api';
 import { THERMAL_WIDTH_MM } from './paper';
 import { useUi } from './ui';
 
@@ -14,7 +14,7 @@ export function ReceiptPage() {
   useEffect(() => {
     api<ReceiptPreview>('/api/v1/receipts/preview')
       .then(setReceipt)
-      .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : t('empty')));
+      .catch((caught: unknown) => setError(formatUserError(caught, t('apiError'))));
   }, [t]);
 
   if (error) return <div className="error">{error}</div>;

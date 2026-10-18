@@ -1,7 +1,19 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
-import { api, type HomeBoard, type ReceiptPreview } from './api';
+import {
+  Banknote,
+  CalendarClock,
+  CalendarX2,
+  ClipboardList,
+  Layers,
+  PackageCheck,
+  PackageMinus,
+  PackagePlus,
+  ReceiptText,
+  type LucideIcon,
+} from 'lucide-react';
+import { ApiError, api, formatUserError, type HomeBoard, type ReceiptPreview } from './api';
 import { LibraryRequest } from './library-request';
 import { ReceiptSlip } from './ReceiptPage';
 import { formatKhartoum, formatMoney, lineAmount, percentAmount, subAmount, sumAmounts } from './locale';
@@ -20,6 +32,15 @@ type CartLine = {
   qty: number;
   price: string;
   stock: number;
+};
+
+type WaitingSale = {
+  id: string;
+  docNo: string;
+  customerName: string;
+  cashierName: string;
+  total: string;
+  lines: { nameAr: string; nameEn: string; qty: number; lineTotal: string }[];
 };
 
 const UNIT_KEY: Record<SaleUnit, 'packBox' | 'packStrip' | 'packBottle' | 'packPiece'> = {
@@ -67,7 +88,7 @@ export function HomeDash() {
         setHome(board.home);
         setError('');
       })
-      .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : t('empty')));
+      .catch((caught: unknown) => setError(formatUserError(caught, t('apiError'))));
   }, [t, tick]);
 
   if (error) return <div className="error">{error}</div>;
@@ -75,21 +96,44 @@ export function HomeDash() {
 
   const arabic = ui.language.startsWith('ar');
   const money = (amount: string) => `${formatMoney(amount)} ${t('sdg')}`;
+  const nearExpiry = home.expiry.filter((row) => row.daysLeft >= 0 && row.daysLeft <= 90).length;
+  const openPurchases = home.purchases.filter((row) => row.status !== 'RECEIVED' && row.status !== 'CANCELLED').length;
 
   return (
     <div className="dash">
-      <section className="kpi-row">
-        <Kpi tone="ok" label={t('salesTodayKpi')} value={money(home.salesToday)} note={`${home.salesCount}`} />
-        <Kpi tone="info" label={t('purchasesMonth')} value={money(home.purchasesMonth)} note={t('procurement')} />
-        <Kpi tone="watch" label={t('lowDrugs')} value={String(home.lowCount)} note={t('reorderAction')} />
-        <Kpi tone="bad" label={t('expiredDrugs')} value={String(home.expiredCount)} note={t('expiryAlerts')} />
+      <section className="dash-hero panel-card">
+        <div>
+          <h2 className="dash-hero-title">{t('dashGreeting')}</h2>
+          <p className="lede">{t('dashLead')}</p>
+        </div>
+        <div className="dash-quick">
+          <Link className="primary fit" to="/app/pos">
+            {t('quickPos')}
+          </Link>
+          <Link className="ghost" to="/app/purchasing">
+            {t('procurement')}
+          </Link>
+        </div>
+      </section>
+      <WorkflowStrip
+        t={t}
+        openPurchases={openPurchases}
+        stocking={home.stocking}
+        salesCount={home.salesCount}
+      />
+      <section className="kpi-row kpi-row-5">
+        <Kpi tone="ok" icon={Banknote} label={t('salesTodayKpi')} value={money(home.salesToday)} note={t('sales')} />
+        <Kpi tone="info" icon={ReceiptText} label={t('invoiceCount')} value={String(home.salesCount)} note={t('salesTodayKpi')} />
+        <Kpi tone="watch" icon={PackageMinus} label={t('lowDrugs')} value={String(home.lowCount)} note={t('reorderAction')} />
+        <Kpi tone="watch" icon={CalendarClock} label={t('nearExpiryKpi')} value={String(nearExpiry)} note={t('expiryAlerts')} />
+        <Kpi tone="bad" icon={CalendarX2} label={t('expiredDrugs')} value={String(home.expiredCount)} note={t('expired')} />
       </section>
       {home.stocking ? (
         <section className="kpi-row">
-          <Kpi tone="watch" label={t('buyPendingReceipts')} value={String(home.stocking.pendingReceipts)} note={t('poApproved')} />
-          <Kpi tone="info" label={t('buyReceived')} value={String(home.stocking.receivedLines)} note={t('procurement')} />
-          <Kpi tone="watch" label={t('invReady')} value={String(home.stocking.awaitingPosting)} note={String(home.stocking.pendingQty)} />
-          <Kpi tone="ok" label={t('invOnHand')} value={String(home.stocking.availableQty)} note={t('invNewStock') + ' ' + home.stocking.newlyStocked} />
+          <Kpi tone="watch" icon={ClipboardList} label={t('buyPendingReceipts')} value={String(home.stocking.pendingReceipts)} note={t('poApproved')} />
+          <Kpi tone="info" icon={PackagePlus} label={t('buyReceived')} value={String(home.stocking.receivedLines)} note={t('procurement')} />
+          <Kpi tone="watch" icon={Layers} label={t('invReady')} value={String(home.stocking.awaitingPosting)} note={String(home.stocking.pendingQty)} />
+          <Kpi tone="ok" icon={PackageCheck} label={t('invOnHand')} value={String(home.stocking.availableQty)} note={t('invNewStock') + ' ' + home.stocking.newlyStocked} />
         </section>
       ) : null}
       <div className="dash-body">
@@ -133,6 +177,9 @@ export function HomeDash() {
             </Panel>
           </div>
           <div className="chart-row">
+            <Panel title={t('expiryDistribution')}>
+              <ExpiryDistribution expiry={home.expiry} t={t} />
+            </Panel>
             <Panel title={t('cashPicture')}>
               <Meter
                 rows={[
@@ -327,7 +374,7 @@ export function PosPage() {
         setHome(board.home);
         setError('');
       })
-      .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : t('empty')));
+      .catch((caught: unknown) => setError(formatUserError(caught, t('apiError'))));
   }, [t, tick]);
 
   if (error) return <div className="error">{error}</div>;
@@ -352,8 +399,31 @@ function QuickPos({ home, onSold }: { home: HomeBoard; onSold: () => void }) {
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(0);
   const [slip, setSlip] = useState<ReceiptPreview | null>(null);
+  const [roleCode, setRoleCode] = useState('');
+  const [waiting, setWaiting] = useState<WaitingSale[]>([]);
+  const [desk, setDesk] = useState<WaitingSale | null>(null);
+  const [taken, setTaken] = useState('');
+  const [stamp, setStamp] = useState<WaitingSale & { paid: string; changeDue: string; cashierName: string } | null>(null);
   const allBranches = localStorage.getItem('dawaa.branch') === 'all';
   const arabic = ui.language.startsWith('ar');
+
+  useEffect(() => {
+    api<{ role: { code: string } | null }>('/api/v1/auth/me')
+      .then((me) => setRoleCode(me.role?.code ?? ''))
+      .catch(() => setRoleCode(''));
+    api<{ sales: WaitingSale[] }>('/api/v1/ops/sales/waiting')
+      .then((body) => setWaiting(body.sales))
+      .catch(() => setWaiting([]));
+  }, []);
+
+  function reloadWaiting() {
+    api<{ sales: WaitingSale[] }>('/api/v1/ops/sales/waiting')
+      .then((body) => setWaiting(body.sales))
+      .catch(() => setWaiting([]));
+  }
+
+  const pharmacist = roleCode === 'PHARMACIST' || roleCode === 'ASSISTANT_PHARMACIST';
+  const cashierDesk = roleCode === 'CASHIER' || roleCode === 'OWNER' || roleCode === 'BRANCH_MANAGER';
 
   useEffect(() => {
     const needle = query.trim();
@@ -424,33 +494,46 @@ function QuickPos({ home, onSold }: { home: HomeBoard; onSold: () => void }) {
   const discount = percentAmount(subtotal, discountPct || '0');
   const total = subAmount(subtotal, discount);
 
-  async function sell() {
+  async function sell(hold = false) {
     if (lines.length === 0 || allBranches || busy) return;
     setBusy(true);
     setProgress(15);
     const timer = window.setInterval(() => setProgress((value) => Math.min(value + 20, 90)), 80);
     try {
-      const result = await api<{ docNo: string; total: string }>('/api/v1/ops/sales', {
+      const result = await api<{ docNo: string; total: string; status?: string }>('/api/v1/ops/sales', {
         method: 'POST',
         body: JSON.stringify({
           customerName: customerName.trim() || t('walkIn'),
           discount,
-          paid: total,
+          paid: hold ? '0.00' : total,
           paymentMethod,
+          hold,
           lines: lines.map((line) => ({ productId: line.productId, qty: line.qty, unit: line.unitCode })),
         }),
       });
       setProgress(100);
-      const preview = await api<ReceiptPreview>('/api/v1/receipts/preview');
-      setSlip(preview);
       setLines([]);
       setDiscountPct('0');
       setCustomerName('');
-      onSold();
-      ui.push({ tone: 'ok', title: t('posted'), body: `${result.docNo} · ${formatMoney(result.total)} ${t('sdg')}` });
+      if (hold) {
+        reloadWaiting();
+        ui.push({ tone: 'ok', title: t('sendCashier'), body: `${result.docNo} · ${formatMoney(result.total)} ${t('sdg')}` });
+      } else {
+        const preview = await api<ReceiptPreview>('/api/v1/receipts/preview');
+        setSlip(preview);
+        onSold();
+        ui.push({ tone: 'ok', title: t('posted'), body: `${result.docNo} · ${formatMoney(result.total)} ${t('sdg')}` });
+      }
     } catch (caught: unknown) {
-      const code = caught instanceof Error ? caught.message : '';
-      const body = code === 'STOCK_SHORT' ? t('stockShort') : code === 'VALIDATION_ERROR' ? t('noPrice') : code === 'PICK_BRANCH' ? t('pickBranchSell') : t('saleFailed');
+      const code = caught instanceof ApiError ? caught.code : '';
+      const body =
+        code === 'STOCK_SHORT'
+          ? t('stockShort')
+          : code === 'NO_SELL_PRICE' || code === 'VALIDATION_ERROR'
+            ? t('noPrice')
+            : code === 'PICK_BRANCH'
+              ? t('pickBranchSell')
+              : formatUserError(caught, t('saleFailed'));
       ui.push({ tone: 'urgent', title: t('quickPos'), body });
       setProgress(0);
     } finally {
@@ -466,11 +549,70 @@ function QuickPos({ home, onSold }: { home: HomeBoard; onSold: () => void }) {
     ['TRANSFER', t('transfer')],
   ] as const;
 
+  async function takePayment() {
+    if (!desk || busy) return;
+    const paid = taken.trim() || desk.total;
+    setBusy(true);
+    try {
+      const saved = await api<WaitingSale & { paid: string; changeDue: string; cashierName: string }>('/api/v1/ops/sales/receive', {
+        method: 'POST',
+        body: JSON.stringify({ saleId: desk.id, paid, paymentMethod }),
+      });
+      setStamp(saved);
+      setDesk(null);
+      setTaken('');
+      reloadWaiting();
+      onSold();
+      ui.push({ tone: 'ok', title: t('stamped'), body: saved.docNo });
+    } catch (caught: unknown) {
+      const code = caught instanceof ApiError ? caught.code : '';
+      ui.push({
+        tone: 'urgent',
+        title: t('cashier'),
+        body: code === 'STOCK_SHORT' ? t('stockShort') : formatUserError(caught, t('saleFailed')),
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <aside className="pos">
       <header>
         <h2>{t('quickPos')}</h2>
       </header>
+      {cashierDesk && waiting.length > 0 ? (
+        <div className="desk-wait">
+          <strong>{t('cashierWaiting', { count: waiting.length })}</strong>
+          {waiting.map((sale) => (
+            <button key={sale.id} type="button" className={desk?.id === sale.id ? 'on' : ''} onClick={() => { setDesk(sale); setTaken(sale.total); }}>
+              <b>{sale.docNo}</b>
+              <span>{sale.customerName} · {formatMoney(sale.total)} {t('sdg')}</span>
+              <small>{sale.cashierName}</small>
+            </button>
+          ))}
+        </div>
+      ) : null}
+      {desk ? (
+        <div className="desk-wait">
+          <p className="lede">{t('cashierDesk')}</p>
+          <ul className="pos-lines">
+            {desk.lines.map((line) => (
+              <li key={`${line.nameEn}-${line.qty}`}>
+                <strong>{arabic ? line.nameAr : line.nameEn}</strong>
+                <span> × {line.qty} · {formatMoney(line.lineTotal)}</span>
+              </li>
+            ))}
+          </ul>
+          <label className="field">
+            <span>{t('amountReceived')}</span>
+            <input value={taken} inputMode="decimal" onChange={(event) => setTaken(event.target.value)} />
+          </label>
+          <button className="primary" type="button" disabled={busy} onClick={() => void takePayment()}>
+            {t('amountReceived')}
+          </button>
+        </div>
+      ) : null}
       <label className="field">
         <span>{t('posSearch')}</span>
         <input
@@ -617,9 +759,38 @@ function QuickPos({ home, onSold }: { home: HomeBoard; onSold: () => void }) {
           <i style={{ width: `${progress}%` }} />
         </div>
       ) : null}
-      <button className="primary" type="button" disabled={busy || lines.length === 0 || allBranches} onClick={() => void sell()}>
-        {t('completeSale')}
-      </button>
+      {pharmacist || roleCode === 'OWNER' || roleCode === 'BRANCH_MANAGER' ? (
+        <button className="ghost" type="button" disabled={busy || lines.length === 0 || allBranches} onClick={() => void sell(true)}>
+          {t('sendCashier')}
+        </button>
+      ) : null}
+      {!pharmacist ? (
+        <button className="primary" type="button" disabled={busy || lines.length === 0 || allBranches} onClick={() => void sell(false)}>
+          {t('completeSale')}
+        </button>
+      ) : null}
+      {stamp ? (
+        <div className="modal-back" role="presentation" onClick={() => setStamp(null)}>
+          <div className="modal receipt-modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+            <div className="row">
+              <button className="primary fit" type="button" onClick={() => window.print()}>{t('print')}</button>
+              <button className="ghost" type="button" onClick={() => setStamp(null)}>{t('close')}</button>
+            </div>
+            <article className="receipt">
+              <p className="receipt-stamp">{t('stamped')}</p>
+              <h2>{stamp.docNo}</h2>
+              <p>{stamp.customerName}</p>
+              <p>{t('cashier')}: {stamp.cashierName}</p>
+              {stamp.lines.map((line) => (
+                <p key={`${line.nameEn}-${line.qty}`}>{arabic ? line.nameAr : line.nameEn} × {line.qty} · {line.lineTotal}</p>
+              ))}
+              <p>{t('total')} {stamp.total}</p>
+              <p>{t('amountReceived')} {stamp.paid}</p>
+              <p>{t('changeDue')} {stamp.changeDue}</p>
+            </article>
+          </div>
+        </div>
+      ) : null}
       {slip ? (
         <div className="modal-back" role="presentation" onClick={() => setSlip(null)}>
           <div className="modal receipt-modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
@@ -641,10 +812,105 @@ function QuickPos({ home, onSold }: { home: HomeBoard; onSold: () => void }) {
   );
 }
 
-function Kpi({ tone, label, value, note }: { tone: string; label: string; value: string; note: string }) {
+function WorkflowStrip({
+  t,
+  openPurchases,
+  stocking,
+  salesCount,
+}: {
+  t: (key: string, options?: Record<string, unknown>) => string;
+  openPurchases: number;
+  stocking: HomeBoard['stocking'];
+  salesCount: number;
+}) {
+  const steps = [
+    { key: 'dashFlowPo', count: openPurchases, to: '/app/purchasing' },
+    { key: 'dashFlowReceive', count: stocking?.pendingReceipts ?? 0, to: '/app/purchasing' },
+    { key: 'dashFlowStock', count: stocking?.awaitingPosting ?? 0, to: '/app/inventory' },
+    { key: 'dashFlowAvailable', count: stocking?.availableQty ?? 0, to: '/app/inventory' },
+    { key: 'prices', count: null, to: '/app/prices' },
+    { key: 'sales', count: salesCount, to: '/app/sales' },
+  ];
+  return (
+    <section className="dash-flow panel-card" aria-label={t('dashFlowTitle')}>
+      <h2>{t('dashFlowTitle')}</h2>
+      <ol className="dash-flow-track">
+        {steps.map((step, index) => (
+          <li key={step.key}>
+            <Link to={step.to} className="dash-flow-step">
+              <strong>{t(step.key)}</strong>
+              <span>{step.count === null ? '—' : step.count}</span>
+            </Link>
+            {index < steps.length - 1 ? <span className="dash-flow-chevron" aria-hidden="true" /> : null}
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
+function ExpiryDistribution({
+  expiry,
+  t,
+}: {
+  expiry: HomeBoard['expiry'];
+  t: (key: string, options?: Record<string, unknown>) => string;
+}) {
+  const buckets = { expired: 0, under30: 0, under90: 0, safe: 0 };
+  for (const row of expiry) {
+    if (row.daysLeft < 0) buckets.expired += row.qty;
+    else if (row.daysLeft <= 30) buckets.under30 += row.qty;
+    else if (row.daysLeft <= 90) buckets.under90 += row.qty;
+    else buckets.safe += row.qty;
+  }
+  const total = buckets.expired + buckets.under30 + buckets.under90 + buckets.safe;
+  if (total === 0) return <p className="chart-read">{t('empty')}</p>;
+  const pct = (value: number) => `${Math.round((value / total) * 100)}%`;
+  const rows = [
+    { tone: 'bad', label: t('expiryBucketExpired'), value: buckets.expired },
+    { tone: 'watch', label: t('expiryBucket30'), value: buckets.under30 },
+    { tone: 'warn', label: t('expiryBucket90'), value: buckets.under90 },
+    { tone: 'ok', label: t('expiryBucketSafe'), value: buckets.safe },
+  ];
+  return (
+    <div className="expiry-meter">
+      <div className="expiry-meter-bar" role="img" aria-label={t('expiryDistribution')}>
+        {rows.map((row) =>
+          row.value > 0 ? (
+            <span key={row.label} className={`expiry-seg ${row.tone}`} style={{ flex: row.value }} title={`${row.label} ${pct(row.value)}`} />
+          ) : null,
+        )}
+      </div>
+      <ul className="expiry-meter-legend">
+        {rows.map((row) => (
+          <li key={row.label}>
+            <i className={row.tone} aria-hidden="true" />
+            {row.label} <b>{pct(row.value)}</b>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function Kpi({
+  tone,
+  icon: Icon,
+  label,
+  value,
+  note,
+}: {
+  tone: string;
+  icon: LucideIcon;
+  label: string;
+  value: string;
+  note: string;
+}) {
   return (
     <article className={`kpi-card ${tone}`}>
-      <span className="kpi-mark" aria-hidden="true" />
+      <span className="kpi-mark" aria-hidden="true">
+        <Icon size={23} strokeWidth={2.1} />
+      </span>
       <em>{label}</em>
       <strong>{value}</strong>
       <small>{note}</small>
@@ -780,7 +1046,7 @@ export function CustomersPage() {
   useEffect(() => {
     api<{ home: HomeBoard }>('/api/v1/dashboard')
       .then((board) => setRows(board.home.customers))
-      .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : t('empty')));
+      .catch((caught: unknown) => setError(formatUserError(caught, t('apiError'))));
   }, [t]);
   return (
     <section className="panel-card">

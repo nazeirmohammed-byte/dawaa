@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useSearchParams } from 'react-router-dom';
-import { api } from './api';
+import { api, formatUserError } from './api';
 import { useUi } from './ui';
 
 type Severity = 'critical' | 'high' | 'medium' | 'info';
@@ -124,7 +124,7 @@ export function AlertsPage() {
         const openId = next.get('id');
         if (openId) setSelected(body.items.find((item) => item.id === openId) ?? null);
       })
-      .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : t('empty')));
+      .catch((caught: unknown) => setError(formatUserError(caught, t('apiError'))));
   }
 
   useEffect(() => {
@@ -162,7 +162,7 @@ export function AlertsPage() {
       setSelected(null);
       load(params);
     } catch (caught: unknown) {
-      setActionError(caught instanceof Error ? caught.message : t('empty'));
+      setActionError(formatUserError(caught, t('apiError')));
     }
   }
 

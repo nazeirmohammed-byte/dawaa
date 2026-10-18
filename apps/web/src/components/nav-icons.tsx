@@ -1,0 +1,58 @@
+import {
+  AlertTriangle,
+  Building2,
+  CircleDollarSign,
+  FileBarChart,
+  LayoutDashboard,
+  LifeBuoy,
+  LogOut,
+  Package,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Receipt,
+  Settings,
+  ShieldCheck,
+  ShoppingCart,
+  Stethoscope,
+  Store,
+  Truck,
+  Users,
+  Wallet,
+  type LucideIcon,
+} from 'lucide-react';
+
+const ICONS: Record<string, LucideIcon> = {
+  control: LayoutDashboard,
+  quickPos: ShoppingCart,
+  sales: Receipt,
+  medicines: Package,
+  inventory: Package,
+  alerts: AlertTriangle,
+  prices: CircleDollarSign,
+  procurement: Truck,
+  suppliers: Store,
+  customers: Users,
+  prescriptions: Stethoscope,
+  accounts: Wallet,
+  finance: Wallet,
+  reports: FileBarChart,
+  branches: Building2,
+  users: Users,
+  permissions: ShieldCheck,
+  settings: Settings,
+  support: LifeBuoy,
+  logout: LogOut,
+  collapse: PanelLeftClose,
+  expand: PanelLeftOpen,
+  groupSell: ShoppingCart,
+  groupStock: Package,
+  groupBuy: Truck,
+  groupPeople: Users,
+  groupMoney: Wallet,
+  groupSetup: Settings,
+};
+
+export function NavIcon({ name, size = 18 }: { name: string; size?: number }) {
+  const Icon = ICONS[name] ?? LayoutDashboard;
+  return <Icon className="nav-ico-lucide" size={size} strokeWidth={2} aria-hidden="true" />;
+}

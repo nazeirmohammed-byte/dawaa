@@ -209,6 +209,44 @@ export const ERROR_TEXT = {
     ar: 'لا يمكن تأجيل هذا التنبيه بهذه المدة.',
     en: 'This alert cannot be snoozed for that long.',
   },
+  QTY: {
+    ar: 'أدخل كمية صحيحة.',
+    en: 'Enter a valid quantity.',
+  },
+  DATE_ORDER: {
+    ar: 'تاريخ الصنع يجب أن يكون قبل تاريخ الصلاحية.',
+    en: 'Manufacturing date must be before the expiry date.',
+  },
+  SERIAL: {
+    ar: 'أدخل الرقم التسلسلي لهذا الدواء.',
+    en: 'Enter the serial number for this medicine.',
+  },
+  RATE: {
+    ar: 'سعر الصرف المعتمد مطلوب.',
+    en: 'An approved exchange rate is required.',
+  },
+  COST: {
+    ar: 'تحقق من التكلفة والخصم والضريبة.',
+    en: 'Check the cost, discount, and tax.',
+  },
+  PRICE: {
+    ar: 'أدخل سعراً صحيحاً.',
+    en: 'Enter a valid price.',
+  },
+  DB_SCHEMA: {
+    ar: 'قاعدة البيانات تحتاج تحديثاً. أعد تشغيل التحديث أو راجع مدير النظام.',
+    en: 'The database needs an update. Run the migration or ask your administrator.',
+  },
+} as const;
+
+const FIELD_REASON = {
+  taken: { ar: 'مستخدم مسبقاً', en: 'already taken' },
+  required: { ar: 'مطلوب', en: 'required' },
+  short: { ar: 'قصير جداً', en: 'too short' },
+  range: { ar: 'خارج النطاق', en: 'out of range' },
+  invalid: { ar: 'غير صالح', en: 'invalid' },
+  duplicate: { ar: 'مكرر', en: 'duplicate' },
+  email: { ar: 'بريد غير صالح', en: 'invalid email' },
 } as const;
 
 export type ErrorCode = keyof typeof ERROR_TEXT;
@@ -225,6 +263,31 @@ export function errorMessage(code: string, acceptLanguage: string | undefined): 
   const known = ERROR_TEXT[code as ErrorCode];
   if (!known) return arabic ? ERROR_TEXT.INTERNAL.ar : ERROR_TEXT.INTERNAL.en;
   return arabic ? known.ar : known.en;
+}
+
+export function formatErrorDetails(code: string, acceptLanguage: string | undefined, details: unknown): string {
+  const arabic = prefersArabic(acceptLanguage);
+  let message = errorMessage(code, acceptLanguage);
+  if (!details || typeof details !== 'object') return message;
+  const hint = (details as { hint?: string }).hint;
+  if (typeof hint === 'string' && hint.trim()) {
+    if (hint in ERROR_TEXT) message = `${message} ${errorMessage(hint, acceptLanguage)}`;
+    else if (code === 'INTERNAL') message = `${message} (${hint.trim()})`;
+  }
+  const fields = (details as { fields?: Record<string, string> }).fields;
+  if (fields && typeof fields === 'object') {
+    const sep = arabic ? '؛ ' : '; ';
+    const parts = Object.entries(fields).map(([key, value]) => {
+      const reason = FIELD_REASON[value as keyof typeof FIELD_REASON];
+      return reason ? `${key}: ${arabic ? reason.ar : reason.en}` : `${key}: ${value}`;
+    });
+    if (parts.length > 0) message = `${message} (${parts.join(sep)})`;
+  }
+  const column = (details as { column?: string }).column;
+  if (typeof column === 'string' && column.trim()) {
+    message = `${message} (${column})`;
+  }
+  return message;
 }
 
 export function assertFeature(flags: readonly string[], feature: string): void {

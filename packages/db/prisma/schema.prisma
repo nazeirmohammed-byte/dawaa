@@ -564,6 +564,7 @@ model PurchaseLine {
   productId  String   @db.UniqueIdentifier
   qty          Int
   receivedQty  Int      @default(0)
+  unitCode     String   @default("PIECE") @db.NVarChar(16)
   unitCost   Decimal  @db.Decimal(18, 2)
   lineTotal  Decimal  @db.Decimal(18, 2)
   createdAt  DateTime @default(now()) @db.DateTime2

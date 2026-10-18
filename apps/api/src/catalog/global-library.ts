@@ -205,8 +205,7 @@ async function matchingItemIds(db: Db, needle: string): Promise<string[]> {
   return [...ids].slice(0, 80);
 }
 
-export async function searchPublishedLibrary(db: Db, query: string, page = 1): Promise<{ total: number; rows: LibraryHit[] }> {
-  const take = 24;
+export async function searchPublishedLibrary(db: Db, query: string, page = 1, take = 24): Promise<{ total: number; rows: LibraryHit[] }> {
   const skip = Math.max(0, page - 1) * take;
   const needle = query.trim();
   if (!needle) {

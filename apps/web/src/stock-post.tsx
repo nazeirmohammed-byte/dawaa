@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { api } from './api';
+import { api, formatUserError } from './api';
 import { parseGs1 } from './expiry';
 import { formatMoney } from './locale';
 import { useUi } from './ui';
@@ -121,7 +121,7 @@ export function StockPostDialog({
         if (seed.trim()) applySeed(body, next, seed.trim());
       })
       .catch((caught: unknown) => {
-        if (!cancel) setError(caught instanceof Error ? caught.message : t('empty'));
+        if (!cancel) setError(formatUserError(caught, t('apiError')));
       });
     return () => {
       cancel = true;
@@ -226,7 +226,7 @@ export function StockPostDialog({
       clearInventoryDraft();
       onPosted(result.docNo, result.quantity);
     } catch (caught: unknown) {
-      setError(caught instanceof Error ? caught.message : t('empty'));
+      setError(formatUserError(caught, t('apiError')));
       try {
         const fresh = await api<StockDesk>(`/api/v1/ops/stock/pending?clientKey=${encodeURIComponent(clientKey())}`);
         setDesk((current) => (current ? { ...current, lines: fresh.lines, locations: fresh.locations } : fresh));

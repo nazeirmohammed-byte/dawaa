@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { allocateFefo, allocateReceiptCosts, assertJournalBalances, balanceDelta, barHeights, buildHome, canStockReceipt, claimReceiptQty, claimStockQty, inventoryDocNo, manufacturerBatch, orderStockState, placeCompatible, priceChangePct, remainingToStock, suggestPlace, summarizeStocking, usdSellingPrice, daySpan, daysUntil, isSellableLot, containerUnitPrice, pieceUnitCost, priceListDateGate, priceListWorkflow, renewAmount, saleChoices, type StockCandidate } from './ops.logic';
+import { allocateFefo, allocateReceiptCosts, assertJournalBalances, balanceDelta, barHeights, buildHome, canStockReceipt, claimReceiptQty, claimStockQty, duplicateActivePharmacyListIds, inventoryDocNo, manufacturerBatch, orderStockState, placeCompatible, priceChangePct, qtyToStockPieces, remainingToStock, resolveSellingPriceListId, suggestPlace, summarizeStocking, usdSellingPrice, daySpan, daysUntil, isSellableLot, containerUnitPrice, pieceUnitCost, priceListDateGate, priceListWorkflow, renewAmount, saleChoices, type StockCandidate } from './ops.logic';
 
 const today = '2026-10-10';
 
@@ -250,15 +250,16 @@ describe('price list operations', () => {
     expect(containerUnitPrice('1000.00', 10)).toBe('100.00');
     expect(containerUnitPrice('1000.00', 100)).toBe('10.00');
     expect(pieceUnitCost('1000.00', pack)).toBe('10.00');
+    expect(qtyToStockPieces(10, pack, 'BOX')).toBe(1000);
+    expect(qtyToStockPieces(5, pack, 'STRIP')).toBe(50);
+    expect(qtyToStockPieces(2000, null, 'PIECE')).toBe(2000);
     expect(saleChoices(null)).toEqual([{ unit: 'PIECE', pieces: 1, divide: 1 }]);
   });
 
-  it('starts a new list after the current one, and lets a same-day copy replace it', () => {
-    expect(priceListDateGate({ nextOn: '2026-10-20', currentOn: '2026-10-16', copied: false })).toBe('ok');
-    expect(priceListDateGate({ nextOn: '2026-10-16', currentOn: null, copied: false })).toBe('ok');
-    expect(priceListDateGate({ nextOn: '2026-10-16', currentOn: '2026-10-16', copied: false })).toBe('PRICE_DATE');
-    expect(priceListDateGate({ nextOn: '2026-10-15', currentOn: '2026-10-16', copied: true })).toBe('PRICE_DATE');
-    expect(priceListDateGate({ nextOn: '2026-10-16', currentOn: '2026-10-16', copied: true })).toBe('ok');
+  it('allows today or a later day and refuses a back date', () => {
+    expect(priceListDateGate({ nextOn: '2026-10-18', today: '2026-10-18' })).toBe('ok');
+    expect(priceListDateGate({ nextOn: '2026-10-19', today: '2026-10-18' })).toBe('ok');
+    expect(priceListDateGate({ nextOn: '2026-10-17', today: '2026-10-18' })).toBe('PRICE_DATE');
   });
 
   it('keeps, raises by percent, or adds a fixed amount', () => {
@@ -282,5 +283,35 @@ describe('price list operations', () => {
     expect(usdSellingPrice('2.00', '2700.00')).toBe('5400.00');
     expect(priceChangePct('5000.00', '5400.00')).toBe('8.00');
     expect(usdSellingPrice('0.00', '2700.00')).toBeNull();
+  });
+});
+
+describe('selling price list', () => {
+  it('prefers a branch activation over the pharmacy-wide list', () => {
+    const id = resolveSellingPriceListId({
+      branchId: 'b1',
+      lists: [
+        { id: 'shared', scope: 'PHARMACY', status: 'ACTIVE', isActive: true, activatedAt: '2026-10-01', createdAt: '2026-09-01' },
+        { id: 'branch', scope: 'BRANCH', status: 'ACTIVE', isActive: false, activatedAt: '2026-10-02', createdAt: '2026-09-02' },
+      ],
+      branchLinks: [{ branchId: 'b1', priceListId: 'branch', isActive: true, activatedAt: '2026-10-02' }],
+    });
+    expect(id).toBe('branch');
+  });
+
+  it('uses the newest pharmacy-wide list when no branch override exists', () => {
+    const id = resolveSellingPriceListId({
+      branchId: 'b1',
+      lists: [
+        { id: 'old', scope: 'PHARMACY', status: 'ACTIVE', isActive: true, activatedAt: '2026-09-01', createdAt: '2026-08-01' },
+        { id: 'new', scope: 'PHARMACY', status: 'ACTIVE', isActive: true, activatedAt: '2026-10-01', createdAt: '2026-09-01' },
+      ],
+      branchLinks: [],
+    });
+    expect(id).toBe('new');
+    expect(duplicateActivePharmacyListIds([
+      { id: 'old', scope: 'PHARMACY', status: 'ACTIVE', isActive: true, activatedAt: '2026-09-01', createdAt: '2026-08-01' },
+      { id: 'new', scope: 'PHARMACY', status: 'ACTIVE', isActive: true, activatedAt: '2026-10-01', createdAt: '2026-09-01' },
+    ])).toEqual(['old']);
   });
 });

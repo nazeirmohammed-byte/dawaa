@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { api } from './api';
+import { api, formatUserError } from './api';
 import { useUi } from './ui';
 
 type Column = { key: string; labelAr: string; labelEn: string; kind: string };
@@ -55,7 +55,7 @@ export function ReportsHub() {
     if (nextTo) query.set('to', nextTo);
     api<Table>(`/api/v1/ops/reports/table?${query}`)
       .then(setData)
-      .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : t('empty')))
+      .catch((caught: unknown) => setError(formatUserError(caught, t('apiError'))))
       .finally(() => setLoading(false));
   }
 
