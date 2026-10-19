@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { api } from './api';
+import { BrandLogo } from './brand';
 import { HelpTip } from './hint';
 import { LangProvider, tx, type PlatformLang } from './locale';
 import {
@@ -81,15 +82,30 @@ function LoginPage({ onIn }: { onIn: (me: Me) => void }) {
     }
   }
   return (
-    <form className="login panel" onSubmit={submit}>
-      <h1>إدارة منصة دواء</h1>
-      <p>هذه الشاشة لمالك المنصة، وليست لموظفي الصيدلية. الدخول بالجوال وكلمة المرور.</p>
-      <label className="field">الجوال<input dir="ltr" value={phone} onChange={(event) => setPhone(event.target.value)} autoComplete="username" /></label>
-      <label className="field">كلمة المرور<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" /></label>
-      {error ? <p className="error">{error}</p> : null}
-      <button type="submit">دخول</button>
-      <p><a href="/subscribe">طلب اشتراك صيدلية</a></p>
-    </form>
+    <div className="login-screen">
+      <div className="login">
+        <div className="login-brand">
+          <BrandLogo lang="ar" />
+        </div>
+        <form className="panel" onSubmit={submit}>
+          <h1>إدارة منصة دواء</h1>
+          <p className="lede">هذه الشاشة لمالك المنصة، وليست لموظفي الصيدلية. الدخول باسم المستخدم وكلمة المرور.</p>
+          <label className="field">
+            <span>اسم المستخدم</span>
+            <input dir="ltr" value={phone} onChange={(event) => setPhone(event.target.value)} autoComplete="username" />
+          </label>
+          <label className="field">
+            <span>كلمة المرور</span>
+            <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" />
+          </label>
+          {error ? <p className="error">{error}</p> : null}
+          <button type="submit">دخول</button>
+          <p className="hint" style={{ marginTop: 12 }}>
+            <a href="/subscribe">طلب اشتراك صيدلية</a>
+          </p>
+        </form>
+      </div>
+    </div>
   );
 }
 
@@ -208,11 +224,7 @@ export function AdminShell({
     <div className="platform shell" lang={lang} dir={lang === 'ar' ? 'rtl' : 'ltr'}>
       <aside className="nav">
         <div className="brandline">
-          <span className="owner-mark">د</span>
-          <div>
-            <strong>{tx(lang, 'منصة دواء', 'Dawaa platform')}</strong>
-            <small>{tx(lang, 'لوحة المالك', 'Owner console')}</small>
-          </div>
+          <BrandLogo lang={lang} light />
         </div>
         <NavLink to="/admin/dashboard" end>{tx(lang, 'اللوحة', 'Board')}</NavLink>
         {groups.map((group) => (

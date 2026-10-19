@@ -212,35 +212,46 @@ async function main(): Promise<void> {
 }
 
 async function seedPlatformAdmin(prisma: PrismaClient): Promise<void> {
-  const phone = process.env.PLATFORM_ADMIN_PHONE?.trim() || '0915138500';
-  const email = process.env.PLATFORM_ADMIN_EMAIL?.trim() || `super+${phone}@dwaa.local`;
-  const password = process.env.PLATFORM_ADMIN_PASSWORD;
-  if (!password || password.length < 10) {
-    console.log('PLATFORM_ADMIN_PASSWORD missing; platform admin not seeded.');
-    return;
+  // Single SaaS super account used across local / staging / live seeds.
+  const phone = process.env.PLATFORM_ADMIN_PHONE?.trim() || 'supoer';
+  const email = process.env.PLATFORM_ADMIN_EMAIL?.trim() || 'supoer@dwaa.local';
+  const password = process.env.PLATFORM_ADMIN_PASSWORD?.trim() || 'Nee3o20077@@';
+  if (password.length < 10) {
+    throw new Error('PLATFORM_ADMIN_PASSWORD must be at least 10 characters');
   }
   const role = await prisma.platformRole.findUnique({ where: { code: 'SUPER_ADMIN' } });
   if (!role) throw new Error('Platform roles are missing. Apply infra/sql/010_platform.sql first.');
   const passwordHash = await hash(password, ARGON2_OPTIONS);
-  const found = await prisma.platformUser.findFirst({ where: { OR: [{ phone }, { email }] } });
+  const found = await prisma.platformUser.findFirst({
+    where: {
+      OR: [{ phone }, { email }, { phone: '0915138500' }, { email: { startsWith: 'super+' } }],
+    },
+  });
   if (found) {
     await prisma.platformUser.update({
       where: { id: found.id },
-      data: { phone, email, passwordHash, isActive: true },
+      data: {
+        phone,
+        email,
+        displayName: 'Super Admin',
+        passwordHash,
+        isActive: true,
+        failedLogins: 0,
+      },
     });
-    console.log(`Updated platform admin ${phone}.`);
+    console.log(`Updated platform super admin (${phone}).`);
     return;
   }
   await prisma.platformUser.create({
     data: {
       email,
       phone,
-      displayName: 'مدير المنصة',
+      displayName: 'Super Admin',
       passwordHash,
       roleId: role.id,
     },
   });
-  console.log(`Seeded platform admin ${phone}.`);
+  console.log(`Seeded platform super admin (${phone}).`);
 }
 
 main().catch((error: unknown) => {

@@ -1,7 +1,29 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useSearchParams } from 'react-router-dom';
+import {
+  AlertCircle,
+  AlertOctagon,
+  AlertTriangle,
+  Bell,
+  BellOff,
+  CalendarClock,
+  Cloud,
+  FileSpreadsheet,
+  History,
+  Info,
+  Package,
+  Printer,
+  Search,
+  ShoppingCart,
+  BadgeDollarSign,
+  TrendingUp,
+  Wallet,
+  X,
+  type LucideIcon,
+} from 'lucide-react';
 import { api, formatUserError } from './api';
+import { EmptyState, ErrorState, LoadingSkeleton, PageHeader, StatusBadge } from './components/ds';
 import { useUi } from './ui';
 
 type Severity = 'critical' | 'high' | 'medium' | 'info';
@@ -86,6 +108,45 @@ const sevKey: Record<string, string> = {
   info: 'sevInfo',
 };
 
+const cardIcon: Record<string, LucideIcon> = {
+  critical: AlertOctagon,
+  expiry: CalendarClock,
+  stock: Package,
+  fast: TrendingUp,
+  slow: TrendingUp,
+  excess: Package,
+  procurement: ShoppingCart,
+  pricing: BadgeDollarSign,
+  payments: Wallet,
+  profit: BadgeDollarSign,
+  discrepancy: AlertCircle,
+};
+
+const catIcon: Record<string, LucideIcon> = {
+  STOCK: Package,
+  EXPIRY: CalendarClock,
+  DEMAND: TrendingUp,
+  PROCUREMENT: ShoppingCart,
+  PRICING: BadgeDollarSign,
+  FINANCE: Wallet,
+  SAAS: Cloud,
+};
+
+function severityTone(severity: Severity): 'danger' | 'warning' | 'info' | 'neutral' {
+  if (severity === 'critical' || severity === 'high') return 'danger';
+  if (severity === 'medium') return 'warning';
+  if (severity === 'info') return 'info';
+  return 'neutral';
+}
+
+function SeverityIcon({ severity }: { severity: Severity }) {
+  const props = { size: 16, strokeWidth: 2.25, 'aria-hidden': true as const };
+  if (severity === 'critical') return <AlertOctagon {...props} />;
+  if (severity === 'high') return <AlertTriangle {...props} />;
+  if (severity === 'medium') return <AlertCircle {...props} />;
+  return <Info {...props} />;
+}
+
 export function AlertsPage() {
   const { t } = useTranslation();
   const ui = useUi();
@@ -98,6 +159,7 @@ export function AlertsPage() {
   const [snoozeDays, setSnoozeDays] = useState('1');
   const [prefs, setPrefs] = useState({ immediate: true, daily: true, weekly: false });
   const [actionError, setActionError] = useState('');
+  const [prefsOpen, setPrefsOpen] = useState(false);
   const card = params.get('card') ?? '';
   const status = params.get('status') === 'history' || params.get('status') === 'snoozed' ? params.get('status')! : 'active';
   const severity = params.get('severity') ?? 'all';
@@ -154,6 +216,15 @@ export function AlertsPage() {
     ] as const;
   }, [data, t]);
 
+  const summary = useMemo(() => {
+    if (!data) return { critical: 0, high: 0, total: 0, exposure: '0.00' };
+    const critical = data.cards.find((row) => row.id === 'critical')?.count ?? 0;
+    const high = data.charts.severities.find((row) => row.id === 'high')?.count ?? 0;
+    const total = data.charts.severities.reduce((sum, row) => sum + row.count, 0);
+    const exposure = data.cards.find((row) => row.id === 'critical')?.exposure ?? '0.00';
+    return { critical, high, total, exposure };
+  }, [data]);
+
   async function act(type: 'ack' | 'snooze' | 'resolve' | 'assign', extra: { days?: number; assigneeId?: string | null } = {}) {
     if (!selected) return;
     setActionError('');
@@ -191,152 +262,359 @@ export function AlertsPage() {
     window.location.assign(`/api/v1/alerts/export.xlsx?${query}`);
   }
 
-  if (error) return <p className="error">{error}</p>;
-  if (!data) return <p className="lede">{t('working')}</p>;
-  const text = (item: AlertItem) => (arabic ? { title: item.titleAr, detail: item.detailAr, figure: item.figureAr, action: item.recommendedAr, branch: item.branchNameAr } : { title: item.titleEn, detail: item.detailEn, figure: item.figureEn, action: item.recommendedEn, branch: item.branchNameEn });
+  if (error) {
+    return <ErrorState message={error} onRetry={() => load(params)} />;
+  }
+  if (!data) {
+    return (
+      <section className="alerts-center">
+        <PageHeader title={t('alerts')} hint={t('hintAlerts')} />
+        <LoadingSkeleton lines={6} />
+      </section>
+    );
+  }
+
+  const text = (item: AlertItem) =>
+    arabic
+      ? { title: item.titleAr, detail: item.detailAr, figure: item.figureAr, action: item.recommendedAr, branch: item.branchNameAr }
+      : { title: item.titleEn, detail: item.detailEn, figure: item.figureEn, action: item.recommendedEn, branch: item.branchNameEn };
 
   return (
-    <section className="stack alerts-center">
-      <div className="alert-cards">
+    <section className="alerts-center">
+      <PageHeader
+        title={t('alerts')}
+        hint={t('hintAlerts')}
+        actions={
+          <div className="alerts-header-actions">
+            <button type="button" className="ghost" onClick={printPdf}>
+              <Printer size={16} aria-hidden />
+              {t('exportPdf')}
+            </button>
+            <button type="button" className="ghost" onClick={excel}>
+              <FileSpreadsheet size={16} aria-hidden />
+              {t('exportExcel')}
+            </button>
+            <button type="button" className="ghost" onClick={() => setPrefsOpen((open) => !open)}>
+              <Bell size={16} aria-hidden />
+              {t('alertPrefs')}
+            </button>
+          </div>
+        }
+      />
+
+      <div className="alerts-summary">
+        <article className="alerts-summary-card tone-danger">
+          <span>{t('sevCritical')}</span>
+          <strong>{summary.critical}</strong>
+          <small>{summary.exposure !== '0.00' ? summary.exposure : '—'}</small>
+        </article>
+        <article className="alerts-summary-card tone-warn">
+          <span>{t('sevHigh')}</span>
+          <strong>{summary.high}</strong>
+          <small>{t('alertActive')}</small>
+        </article>
+        <article className="alerts-summary-card tone-info">
+          <span>{t('alertActive')}</span>
+          <strong>{status === 'active' ? data.items.length : summary.total}</strong>
+          <small>{t('alertAll')}</small>
+        </article>
+        <article className="alerts-summary-card">
+          <span>{t('alertSnoozed')}</span>
+          <strong>{data.snoozedCount}</strong>
+          <small>{t('alertHistory')}: {data.historyCount}</small>
+        </article>
+      </div>
+
+      <div className="alerts-metric-grid" role="list">
         {CARDS.map((id) => {
           const row = data.cards.find((cardRow) => cardRow.id === id);
+          const Icon = cardIcon[id] ?? AlertCircle;
+          const active = card === id;
           return (
-            <button key={id} type="button" className={`kpi-card ${card === id ? 'on' : ''} ${id === 'critical' ? 'bad' : ''}`} onClick={() => setFilter({ card: card === id ? '' : id, status: 'active' })}>
-              <em>{t(cardKey[id] ?? id)}</em>
-              <strong>{row?.count ?? 0}</strong>
-              <small>{row && row.exposure !== '0.00' ? row.exposure : ''}</small>
+            <button
+              key={id}
+              type="button"
+              role="listitem"
+              className={`alerts-metric${active ? ' on' : ''}${id === 'critical' ? ' critical' : ''}`}
+              onClick={() => setFilter({ card: active ? '' : id, status: 'active' })}
+            >
+              <span className="alerts-metric-icon" aria-hidden>
+                <Icon size={18} strokeWidth={2.2} />
+              </span>
+              <span className="alerts-metric-body">
+                <em>{t(cardKey[id] ?? id)}</em>
+                <strong>{row?.count ?? 0}</strong>
+              </span>
+              {row && row.exposure !== '0.00' ? <small>{row.exposure}</small> : <small aria-hidden>&nbsp;</small>}
             </button>
           );
         })}
       </div>
-      <div className="alert-charts">
-        <article className="panel-card">
-          <h2>{t('alertTrend')}</h2>
-          <p className="lede">{data.charts.trendMode === 'snapshot' ? t('alertSnapshot') : t('alertTrend')}</p>
-          <div className="bars">
+
+      <div className="alerts-insights">
+        <article className="alerts-panel">
+          <header>
+            <h2>{t('alertTrend')}</h2>
+            <p>{data.charts.trendMode === 'snapshot' ? t('alertSnapshot') : t('alertTrend')}</p>
+          </header>
+          <div className="alerts-bars" aria-hidden>
             {data.charts.trend.map((row) => (
               <span key={row.day} title={`${row.day}: ${row.count}`}>
-                <i style={{ height: `${Math.max(4, (row.count / maxTrend) * 100)}%` }} />
+                <i style={{ height: `${Math.max(8, (row.count / maxTrend) * 100)}%` }} />
               </span>
             ))}
           </div>
         </article>
-        <article className="panel-card">
-          <h2>{t('alertCategories')}</h2>
-          <div className="bars cats">
-            {data.charts.categories.map((row) => (
-              <span key={row.id} title={t(catKey[row.id] ?? row.id)}>
-                <i style={{ height: `${Math.max(4, (row.count / maxCat) * 100)}%` }} />
-                <small>{row.count}</small>
-              </span>
-            ))}
+        <article className="alerts-panel">
+          <header>
+            <h2>{t('alertCategories')}</h2>
+          </header>
+          <div className="alerts-cat-bars">
+            {data.charts.categories.map((row) => {
+              const Icon = catIcon[row.id] ?? AlertCircle;
+              return (
+                <div key={row.id} className="alerts-cat-row">
+                  <span className="alerts-cat-label">
+                    <Icon size={14} aria-hidden />
+                    {t(catKey[row.id] ?? row.id)}
+                  </span>
+                  <span className="alerts-cat-track">
+                    <i style={{ width: `${Math.max(6, (row.count / maxCat) * 100)}%` }} />
+                  </span>
+                  <b>{row.count}</b>
+                </div>
+              );
+            })}
           </div>
         </article>
-        <article className="panel-card">
-          <h2>{t('stockPicture')}</h2>
-          <ul className="risk-list">
+        <article className="alerts-panel">
+          <header>
+            <h2>{t('stockPicture')}</h2>
+          </header>
+          <ul className="alerts-risk-list">
             {stockBars.map(([label, count]) => (
-              <li key={label}><span>{label}</span><b>{count}</b></li>
+              <li key={label}>
+                <span>{label}</span>
+                <b>{count}</b>
+              </li>
             ))}
           </ul>
-          <p>{t('alertExposure')}: {data.charts.exposure.expiry} / {data.charts.exposure.payable} / {data.charts.exposure.receivable}</p>
+          <p className="alerts-exposure-line">
+            {t('alertExposure')}: {data.charts.exposure.expiry} / {data.charts.exposure.payable} / {data.charts.exposure.receivable}
+          </p>
         </article>
       </div>
-      <div className="tabs">
-        <button type="button" className={!card ? 'on' : ''} onClick={() => setFilter({ card: '' })}>{t('alertAll')}</button>
-        {CATS.map((id) => (
-          <button key={id} type="button" className={card === id ? 'on' : ''} onClick={() => setFilter({ card: id })}>{t(catKey[id] ?? id)}</button>
-        ))}
+
+      <div className="alerts-toolbar">
+        <div className="alerts-status-tabs" role="tablist">
+          <button type="button" role="tab" aria-selected={status === 'active'} className={status === 'active' ? 'on' : ''} onClick={() => setFilter({ status: '' })}>
+            <Bell size={15} aria-hidden />
+            {t('alertActive')}
+          </button>
+          <button type="button" role="tab" aria-selected={status === 'snoozed'} className={status === 'snoozed' ? 'on' : ''} onClick={() => setFilter({ status: 'snoozed' })}>
+            <BellOff size={15} aria-hidden />
+            {t('alertSnoozed')}
+            <em>{data.snoozedCount}</em>
+          </button>
+          <button type="button" role="tab" aria-selected={status === 'history'} className={status === 'history' ? 'on' : ''} onClick={() => setFilter({ status: 'history' })}>
+            <History size={15} aria-hidden />
+            {t('alertHistory')}
+            <em>{data.historyCount}</em>
+          </button>
+        </div>
+
+        <div className="alerts-cat-chips">
+          <button type="button" className={!card ? 'on' : ''} onClick={() => setFilter({ card: '' })}>
+            {t('alertAll')}
+          </button>
+          {CATS.map((id) => {
+            const Icon = catIcon[id] ?? AlertCircle;
+            return (
+              <button key={id} type="button" className={card === id ? 'on' : ''} onClick={() => setFilter({ card: id })}>
+                <Icon size={14} aria-hidden />
+                {t(catKey[id] ?? id)}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="alerts-filters">
+          <label className="alerts-search">
+            <Search size={16} aria-hidden />
+            <input
+              value={q}
+              onChange={(event) => setFilter({ q: event.target.value })}
+              placeholder={t('alertSearch')}
+              aria-label={t('alertSearch')}
+            />
+          </label>
+          <label className="field fit">
+            <span>{t('alertSeverity')}</span>
+            <select value={severity} onChange={(event) => setFilter({ severity: event.target.value === 'all' ? '' : event.target.value })}>
+              <option value="all">{t('alertAll')}</option>
+              {(['critical', 'high', 'medium', 'info'] as const).map((id) => (
+                <option key={id} value={id}>{t(sevKey[id] ?? id)}</option>
+              ))}
+            </select>
+          </label>
+          <label className="field fit">
+            <span>{t('alertSort')}</span>
+            <select value={sort} onChange={(event) => setFilter({ sort: event.target.value === 'severity' ? '' : event.target.value })}>
+              <option value="severity">{t('alertSeverity')}</option>
+              <option value="newest">{t('alertNewest')}</option>
+              <option value="oldest">{t('alertOldest')}</option>
+            </select>
+          </label>
+        </div>
       </div>
-      <form className="tools" onSubmit={(event) => event.preventDefault()}>
-        <label className="field fit">{t('alertSearch')}<input value={q} onChange={(event) => setFilter({ q: event.target.value })} /></label>
-        <label className="field fit">{t('alertSeverity')}
-          <select value={severity} onChange={(event) => setFilter({ severity: event.target.value === 'all' ? '' : event.target.value })}>
-            <option value="all">{t('alertAll')}</option>
-            {(['critical', 'high', 'medium', 'info'] as const).map((id) => <option key={id} value={id}>{t(sevKey[id] ?? id)}</option>)}
-          </select>
-        </label>
-        <label className="field fit">{t('alertSort')}
-          <select value={sort} onChange={(event) => setFilter({ sort: event.target.value === 'severity' ? '' : event.target.value })}>
-            <option value="severity">{t('alertSeverity')}</option>
-            <option value="newest">{t('alertNewest')}</option>
-            <option value="oldest">{t('alertOldest')}</option>
-          </select>
-        </label>
-        <button type="button" className={status === 'active' ? 'primary' : ''} onClick={() => setFilter({ status: '' })}>{t('alertActive')}</button>
-        <button type="button" className={status === 'snoozed' ? 'primary' : ''} onClick={() => setFilter({ status: 'snoozed' })}>{t('alertSnoozed')} {data.snoozedCount}</button>
-        <button type="button" className={status === 'history' ? 'primary' : ''} onClick={() => setFilter({ status: 'history' })}>{t('alertHistory')} {data.historyCount}</button>
-        <button type="button" onClick={printPdf}>{t('exportPdf')}</button>
-        <button type="button" onClick={excel}>{t('exportExcel')}</button>
-      </form>
-      {data.items.length === 0 ? <p>{t('alertEmpty')}</p> : null}
-      {data.items.map((item) => {
-        const copy = text(item);
-        return (
-          <article key={item.id} className={`signal ${item.severity}`}>
-            <button type="button" className="alert-open" onClick={() => { setSelected(item); setAssignee(item.assigneeId ?? ''); }}>
-              <h3>{copy.title}</h3>
-              <p>{copy.detail}</p>
-              <b>{copy.figure}</b>
-              <small>{t(sevKey[item.severity] ?? item.severity)} · {t(catKey[item.category] ?? item.category)}{copy.branch ? ` · ${copy.branch}` : ''}{item.estimate ? ` · ${t('alertEstimate')}` : ''}{item.escalated ? ' · !' : ''}</small>
-            </button>
-          </article>
-        );
-      })}
-      <form
-        className="panel-card"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void api('/api/v1/alerts/preferences', { method: 'PUT', body: JSON.stringify(prefs) }).then(() => load(params));
-        }}
-      >
-        <h2>{t('alertPrefs')}</h2>
-        <label className="checkline"><input type="checkbox" checked={prefs.immediate} onChange={(event) => setPrefs({ ...prefs, immediate: event.target.checked })} />{t('alertImmediate')}</label>
-        <label className="checkline"><input type="checkbox" checked={prefs.daily} onChange={(event) => setPrefs({ ...prefs, daily: event.target.checked })} />{t('alertDaily')}</label>
-        <label className="checkline"><input type="checkbox" checked={prefs.weekly} onChange={(event) => setPrefs({ ...prefs, weekly: event.target.checked })} />{t('alertWeekly')}</label>
-        <button className="primary fit" type="submit">{t('save')}</button>
-      </form>
+
+      {prefsOpen ? (
+        <form
+          className="alerts-prefs"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void api('/api/v1/alerts/preferences', { method: 'PUT', body: JSON.stringify(prefs) }).then(() => {
+              setPrefsOpen(false);
+              load(params);
+            });
+          }}
+        >
+          <h2>{t('alertPrefs')}</h2>
+          <div className="alerts-prefs-grid">
+            <label className="checkline"><input type="checkbox" checked={prefs.immediate} onChange={(event) => setPrefs({ ...prefs, immediate: event.target.checked })} />{t('alertImmediate')}</label>
+            <label className="checkline"><input type="checkbox" checked={prefs.daily} onChange={(event) => setPrefs({ ...prefs, daily: event.target.checked })} />{t('alertDaily')}</label>
+            <label className="checkline"><input type="checkbox" checked={prefs.weekly} onChange={(event) => setPrefs({ ...prefs, weekly: event.target.checked })} />{t('alertWeekly')}</label>
+          </div>
+          <button className="primary fit" type="submit">{t('save')}</button>
+        </form>
+      ) : null}
+
+      {data.items.length === 0 ? (
+        <EmptyState title={t('alertEmpty')} body={t('hintAlerts')} />
+      ) : (
+        <div className="alerts-list">
+          {data.items.map((item) => {
+            const copy = text(item);
+            const CatIcon = catIcon[item.category] ?? AlertCircle;
+            return (
+              <article key={item.id} className={`alerts-item sev-${item.severity}`}>
+                <button
+                  type="button"
+                  className="alerts-item-open"
+                  onClick={() => {
+                    setSelected(item);
+                    setAssignee(item.assigneeId ?? '');
+                    setActionError('');
+                  }}
+                >
+                  <div className="alerts-item-rail" aria-hidden>
+                    <SeverityIcon severity={item.severity} />
+                  </div>
+                  <div className="alerts-item-main">
+                    <div className="alerts-item-top">
+                      <StatusBadge tone={severityTone(item.severity)}>{t(sevKey[item.severity] ?? item.severity)}</StatusBadge>
+                      <span className="alerts-item-cat">
+                        <CatIcon size={13} aria-hidden />
+                        {t(catKey[item.category] ?? item.category)}
+                      </span>
+                      {item.escalated ? <StatusBadge tone="danger">!</StatusBadge> : null}
+                      {item.estimate ? <span className="alerts-item-flag">{t('alertEstimate')}</span> : null}
+                    </div>
+                    <h3>{copy.title}</h3>
+                    <p>{copy.detail}</p>
+                    <div className="alerts-item-meta">
+                      {copy.figure ? <strong>{copy.figure}</strong> : null}
+                      {copy.branch ? <span>{copy.branch}</span> : null}
+                      <span>{item.openedAt.slice(0, 16).replace('T', ' ')}</span>
+                      {item.assigneeName ? <span>{item.assigneeName}</span> : null}
+                    </div>
+                  </div>
+                  <span className="alerts-item-chevron" aria-hidden />
+                </button>
+              </article>
+            );
+          })}
+        </div>
+      )}
+
       {selected ? (
-        <div className="modal-back" onClick={() => setSelected(null)}>
-          <article className="modal" onClick={(event) => event.stopPropagation()}>
-            <h2>{text(selected).title}</h2>
+        <div className="alerts-drawer-back" onClick={() => setSelected(null)}>
+          <aside className="alerts-drawer" role="dialog" aria-modal="true" aria-labelledby="alert-drawer-title" onClick={(event) => event.stopPropagation()}>
+            <header className="alerts-drawer-head">
+              <div>
+                <StatusBadge tone={severityTone(selected.severity)}>{t(sevKey[selected.severity] ?? selected.severity)}</StatusBadge>
+                <h2 id="alert-drawer-title">{text(selected).title}</h2>
+              </div>
+              <button type="button" className="ghost icon-btn" onClick={() => setSelected(null)} aria-label={t('close')}>
+                <X size={18} />
+              </button>
+            </header>
             {actionError ? <p className="error">{actionError}</p> : null}
-            <p>{text(selected).detail}</p>
-            <p><b>{text(selected).figure}</b></p>
-            <p>{t('alertCurrent')}: {selected.currentValue}</p>
-            <p>{t('alertThreshold')}: {selected.thresholdValue}</p>
-            <p>{t('alertExposure')}: {selected.exposure}</p>
-            <p>{t('alertRecommended')}: {text(selected).action}</p>
-            {selected.assigneeName ? <p>{t('alertAssign')}: {selected.assigneeName}</p> : null}
-            <p><Link to={selected.actionHref}>{t('alertOpen')}</Link></p>
-            <div className="tools">
-              {selected.status === 'OPEN' ? <button type="button" onClick={() => void act('ack')}>{t('alertAck')}</button> : null}
+            <p className="alerts-drawer-detail">{text(selected).detail}</p>
+            {text(selected).figure ? <p className="alerts-drawer-figure">{text(selected).figure}</p> : null}
+
+            <dl className="alerts-facts">
+              <div><dt>{t('alertCurrent')}</dt><dd>{selected.currentValue || '—'}</dd></div>
+              <div><dt>{t('alertThreshold')}</dt><dd>{selected.thresholdValue || '—'}</dd></div>
+              <div><dt>{t('alertExposure')}</dt><dd>{selected.exposure || '—'}</dd></div>
+              <div className="wide"><dt>{t('alertRecommended')}</dt><dd>{text(selected).action || '—'}</dd></div>
+              {selected.assigneeName ? <div className="wide"><dt>{t('alertAssign')}</dt><dd>{selected.assigneeName}</dd></div> : null}
+            </dl>
+
+            <p className="alerts-drawer-link">
+              <Link to={selected.actionHref}>{t('alertOpen')}</Link>
+            </p>
+
+            <div className="alerts-drawer-actions">
+              {selected.status === 'OPEN' ? (
+                <button type="button" className="ghost" onClick={() => void act('ack')}>{t('alertAck')}</button>
+              ) : null}
               {selected.severity !== 'critical' ? (
-                <>
-                  <select value={snoozeDays} onChange={(event) => setSnoozeDays(event.target.value)}>
+                <div className="alerts-snooze">
+                  <select value={snoozeDays} onChange={(event) => setSnoozeDays(event.target.value)} aria-label={t('alertSnooze')}>
                     <option value="1">1</option>
-                    {selected.severity === 'high' ? null : [2, 3, 7].map((day) => <option key={day} value={day}>{day}</option>)}
+                    {selected.severity === 'high' ? null : [2, 3, 7].map((day) => (
+                      <option key={day} value={day}>{day}</option>
+                    ))}
                   </select>
-                  <button type="button" onClick={() => void act('snooze', { days: Number(snoozeDays) })}>{t('alertSnooze')}</button>
-                </>
+                  <button type="button" className="ghost" onClick={() => void act('snooze', { days: Number(snoozeDays) })}>{t('alertSnooze')}</button>
+                </div>
               ) : null}
               <button type="button" className="primary" onClick={() => void act('resolve')}>{t('alertResolve')}</button>
             </div>
+
             {data.canAssign ? (
-              <form className="tools" onSubmit={(event) => { event.preventDefault(); void act('assign', { assigneeId: assignee || null }); }}>
+              <form
+                className="alerts-assign"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void act('assign', { assigneeId: assignee || null });
+                }}
+              >
                 <select value={assignee} onChange={(event) => setAssignee(event.target.value)}>
                   <option value="">{t('alertAssign')}</option>
-                  {data.staff.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}
+                  {data.staff.map((person) => (
+                    <option key={person.id} value={person.id}>{person.name}</option>
+                  ))}
                 </select>
                 <button type="submit">{t('save')}</button>
               </form>
             ) : null}
+
             <h3>{t('alertHistory')}</h3>
-            <ul className="risk-list">
-              {selected.history.map((entry) => <li key={`${entry.at}-${entry.kind}`}><span>{entry.kind}</span><b>{entry.at.slice(0, 16).replace('T', ' ')}</b></li>)}
-            </ul>
-            <button type="button" onClick={() => setSelected(null)}>{t('close')}</button>
-          </article>
+            {selected.history.length === 0 ? (
+              <p className="lede">{t('alertEmpty')}</p>
+            ) : (
+              <ul className="alerts-history">
+                {selected.history.map((entry) => (
+                  <li key={`${entry.at}-${entry.kind}`}>
+                    <span>{entry.kind}</span>
+                    <time>{entry.at.slice(0, 16).replace('T', ' ')}</time>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </aside>
         </div>
       ) : null}
     </section>

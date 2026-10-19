@@ -31,6 +31,9 @@ $envMap = Read-EnvMap $envPath
 
 if (-not $envMap['SEED_OWNER_PASSWORD']) { $envMap['SEED_OWNER_PASSWORD'] = 'Dawaa-Dev-2026!' }
 if (-not $envMap['SEED_OWNER_EMAIL']) { $envMap['SEED_OWNER_EMAIL'] = 'owner@demo.dawaa.local' }
+if (-not $envMap['PLATFORM_ADMIN_PHONE']) { $envMap['PLATFORM_ADMIN_PHONE'] = 'supoer' }
+if (-not $envMap['PLATFORM_ADMIN_EMAIL']) { $envMap['PLATFORM_ADMIN_EMAIL'] = 'supoer@dwaa.local' }
+if (-not $envMap['PLATFORM_ADMIN_PASSWORD']) { $envMap['PLATFORM_ADMIN_PASSWORD'] = 'Nee3o20077@@' }
 if (-not $envMap['ACCESS_TOKEN_SECRET'] -or $envMap['ACCESS_TOKEN_SECRET'].Length -lt 32) {
   $envMap['ACCESS_TOKEN_SECRET'] = (New-Secret 48)
 }
@@ -70,6 +73,9 @@ $lines = @(
   "REFRESH_TOKEN_TTL_SECONDS=$($envMap['REFRESH_TOKEN_TTL_SECONDS'])",
   "SEED_OWNER_EMAIL=$($envMap['SEED_OWNER_EMAIL'])",
   "SEED_OWNER_PASSWORD=$($envMap['SEED_OWNER_PASSWORD'])",
+  "PLATFORM_ADMIN_PHONE=$($envMap['PLATFORM_ADMIN_PHONE'])",
+  "PLATFORM_ADMIN_EMAIL=$($envMap['PLATFORM_ADMIN_EMAIL'])",
+  "PLATFORM_ADMIN_PASSWORD=$($envMap['PLATFORM_ADMIN_PASSWORD'])",
   "ANALYTICS_SERVICE_TOKEN=$($envMap['ANALYTICS_SERVICE_TOKEN'])",
   "ANALYTICS_URL=$($envMap['ANALYTICS_URL'])",
   "REDIS_URL=$($envMap['REDIS_URL'])",

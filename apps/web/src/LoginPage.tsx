@@ -110,7 +110,7 @@ export function LoginPage() {
   async function adminSubmit(event: FormEvent) {
     event.preventDefault();
     const bag: FieldMap = {};
-    if (!adminPhone.trim()) bag.phone = t('fieldRequired', { label: t('mobile') });
+    if (!adminPhone.trim()) bag.phone = t('fieldRequired', { label: t('adminUser') });
     else if (adminPhone.trim().length < 6) bag.phone = t('fieldShort', { count: 6 });
     if (!adminPassword) bag.password = t('fieldRequired', { label: t('password') });
     if (Object.keys(bag).length) {
@@ -203,7 +203,7 @@ export function LoginPage() {
           {error ? <div className="error">{error}</div> : null}
           {tab === 'admin' ? (
             <>
-              <Field name="phone" label={t('mobile')} message={fields.phone}>
+              <Field name="phone" label={t('adminUser')} message={fields.phone}>
                 <input dir="ltr" value={adminPhone} onChange={(event) => { setAdminPhone(event.target.value); clearField('phone'); }} autoComplete="username" />
               </Field>
               <Field name="password" label={t('password')} message={fields.password}>

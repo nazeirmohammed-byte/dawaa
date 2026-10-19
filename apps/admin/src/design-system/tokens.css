@@ -1,0 +1,132 @@
+/**
+ * DAWAA 2.0 semantic tokens. Legacy variables (--ink, --green, …) map here for gradual migration.
+ */
+:root {
+  color-scheme: light;
+
+  /* Brand — crisp, saturated, high-contrast */
+  --dawaa-primary: #087f8c;
+  --dawaa-primary-strong: #066a76;
+  --dawaa-primary-dark: #164e63;
+  --dawaa-secondary: #12a37c;
+  --dawaa-bg: #e9f1f5;
+  --dawaa-surface: #ffffff;
+  --dawaa-text: #14263c;
+  --dawaa-text-muted: #4d6376;
+  --dawaa-border: #bfcfdb;
+  --dawaa-success: #0b7a5c;
+  --dawaa-success-bright: #12a37c;
+  --dawaa-success-soft: #d9f4e8;
+  --dawaa-warning: #b45309;
+  --dawaa-warning-bright: #f59e0b;
+  --dawaa-warning-soft: #fef0cd;
+  --dawaa-danger: #d92d20;
+  --dawaa-danger-dark: #b42318;
+  --dawaa-danger-soft: #fee4e2;
+  --dawaa-info: #1d6fe0;
+  --dawaa-info-soft: #dbeafe;
+  --dawaa-critical: #b42318;
+
+  /* Medicine category accents (illustration frames, chips) */
+  --med-tablets: #1d6fe0;
+  --med-capsules: #7c3aed;
+  --med-syrup: #d97706;
+  --med-suspension: #ea580c;
+  --med-ointment: #db2777;
+  --med-cream: #e11d63;
+  --med-gel: #0d9488;
+  --med-drops: #0284c7;
+  --med-injection: #d92d20;
+  --med-inhaler: #4f46e5;
+  --med-equipment: #52677d;
+  --med-generic: #087f8c;
+
+  /* Typography scale */
+  --dawaa-font-display: "IBM Plex Sans Arabic", Inter, "Segoe UI", sans-serif;
+  --dawaa-font-body: var(--dawaa-font-display);
+  --dawaa-text-xs: 0.75rem;
+  --dawaa-text-sm: 0.8125rem;
+  --dawaa-text-md: 0.9375rem;
+  --dawaa-text-lg: 1.0625rem;
+  --dawaa-heading-page: clamp(1.25rem, 2vw, 1.75rem);
+  --dawaa-heading-section: 1.125rem;
+
+  /* Spacing & shape */
+  --dawaa-space-1: 4px;
+  --dawaa-space-2: 8px;
+  --dawaa-space-3: 12px;
+  --dawaa-space-4: 16px;
+  --dawaa-space-5: 20px;
+  --dawaa-space-6: 24px;
+  --dawaa-radius-sm: 8px;
+  --dawaa-radius-md: 10px;
+  --dawaa-radius-lg: 14px;
+  --dawaa-shadow-sm: 0 1px 2px rgba(27, 42, 65, 0.06);
+  --dawaa-shadow-md: 0 8px 24px rgba(27, 42, 65, 0.08);
+  --dawaa-focus-ring: 2px solid var(--dawaa-secondary);
+
+  /* Legacy aliases (existing CSS continues to work) */
+  --ink: var(--dawaa-text);
+  --muted: var(--dawaa-text-muted);
+  --blue: var(--dawaa-primary-dark);
+  --blue-2: var(--dawaa-primary);
+  --green: var(--dawaa-success);
+  --green-2: #095f46;
+  --red: var(--dawaa-danger);
+  --red-2: var(--dawaa-danger-dark);
+  --mint: var(--dawaa-success-soft);
+  --sky: #d9edf2;
+  --rose: var(--dawaa-danger-soft);
+  --cream: var(--dawaa-bg);
+  --paper: var(--dawaa-surface);
+  --line: var(--dawaa-border);
+  --brass: var(--dawaa-primary);
+  --brass-soft: var(--sky);
+  --urgent: var(--dawaa-danger);
+  --urgent-soft: var(--rose);
+  --watch: var(--dawaa-warning);
+  --watch-soft: var(--dawaa-warning-soft);
+  --ok: var(--dawaa-success);
+  --ok-soft: var(--dawaa-success-soft);
+  --sidebar: var(--dawaa-primary-dark);
+  --sidebar-text: #eef6f8;
+  --sidebar-active: var(--dawaa-secondary);
+  --shadow: var(--dawaa-shadow-md);
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --dawaa-bg: #090f16;
+  --dawaa-surface: #16212e;
+  --dawaa-text: #f2f7fb;
+  --dawaa-text-muted: #a9bccd;
+  --dawaa-border: #38506a;
+  --dawaa-primary: #45c3cf;
+  --dawaa-primary-dark: #0e2430;
+  --dawaa-secondary: #2ed3a3;
+  --dawaa-success: #2ed3a3;
+  --dawaa-success-soft: #0d3226;
+  --dawaa-warning: #fbbf24;
+  --dawaa-warning-soft: #3d2c07;
+  --dawaa-danger: #ff6b61;
+  --dawaa-danger-dark: #ff8a80;
+  --dawaa-danger-soft: #451512;
+  --dawaa-info: #6cb2ff;
+  --dawaa-info-soft: #122c52;
+  --mint: var(--dawaa-success-soft);
+  --sky: #10303c;
+  --rose: var(--dawaa-danger-soft);
+  --cream: var(--dawaa-bg);
+  --paper: var(--dawaa-surface);
+  --line: var(--dawaa-border);
+  --sidebar: #0a161e;
+  --sidebar-text: #e8eef4;
+  --sidebar-active: var(--dawaa-secondary);
+  --shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+/* Direction comes from html[dir]: sidebar follows normal flex row (RTL = right). */
+html[dir="rtl"] .shell,
+html[dir="ltr"] .shell {
+  flex-direction: row;
+}

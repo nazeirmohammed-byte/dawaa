@@ -1,6 +1,7 @@
 import { cloneElement, FormEvent, isValidElement, useEffect, useState, type ReactElement, type ReactNode } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { ApiError, api, readFile } from './api';
+import { BrandLogo } from './brand';
 import { HelpTip } from './hint';
 import { tx, usePlatformLang, type PlatformLang } from './locale';
 
@@ -1363,7 +1364,7 @@ export function SubscribePage() {
     <section className="subscribe-page" dir={lang === 'ar' ? 'rtl' : 'ltr'} lang={lang}>
       <aside className="subscribe-hero">
         <div>
-          <p className="subscribe-kicker">{say('دواء', 'Dawaa')}</p>
+          <BrandLogo lang={lang} light />
           <h1>{say('طلب اشتراك صيدلية', 'Pharmacy subscription request')}</h1>
           <p>{say('الاسم، الترخيص، والباقة. الولاية والمدينة والحجم تُختار ولا تُكتب.', 'Name, license, and plan. State, city, and size are choices, not typing.')}</p>
         </div>
