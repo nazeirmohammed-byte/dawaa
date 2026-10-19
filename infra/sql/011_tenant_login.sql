@@ -15,8 +15,16 @@ FROM dbo.Tenants AS t
 INNER JOIN numbered AS n ON n.id = t.id;
 GO
 
-IF EXISTS (SELECT 1 FROM dbo.Tenants WHERE accountCode IS NULL)
+IF EXISTS (SELECT 1 FROM dbo.Tenants WHERE accountCode IS NULL OR LTRIM(RTRIM(accountCode)) = N'')
   THROW 50001, N'Tenant accountCode backfill incomplete', 1;
+GO
+
+-- Match Prisma: required column. Safe only after backfill above.
+IF EXISTS (
+  SELECT 1 FROM sys.columns
+  WHERE object_id = OBJECT_ID(N'dbo.Tenants') AND name = N'accountCode' AND is_nullable = 1
+)
+  ALTER TABLE dbo.Tenants ALTER COLUMN accountCode NVARCHAR(32) NOT NULL;
 GO
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Tenants_accountCode' AND object_id = OBJECT_ID(N'dbo.Tenants'))

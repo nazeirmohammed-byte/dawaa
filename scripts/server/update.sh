@@ -50,6 +50,13 @@ backup_db() {
 
 migrate_db() {
   step "Database migration"
+
+  # Backfill required columns Prisma cannot add onto existing rows (no --force-reset on live).
+  for f in 011_tenant_login; do
+    [ -f "infra/sql/$f.sql" ] || continue
+    sql -i "infra/sql/$f.sql" >/tmp/dawaa-sql.out 2>&1 && ok "pre-push $f.sql" || { cat /tmp/dawaa-sql.out; die "$f.sql failed"; }
+  done
+
   if (cd packages/db && DATABASE_URL="$MIG_URL" pnpm exec prisma db push --skip-generate) >/tmp/dawaa-push.out 2>&1; then
     ok "prisma db push"
   elif grep -q "Cannot alter column 'rowVersion'" /tmp/dawaa-push.out; then
@@ -65,7 +72,7 @@ migrate_db() {
     sql -i infra/sql/006_ops_tables.sql >/tmp/dawaa-sql.out 2>&1 && ok "006_ops_tables.sql" || { cat /tmp/dawaa-sql.out; die "006_ops_tables.sql failed"; }
   fi
 
-    for f in 008_prices 009_catalog_price_stock 010_platform 011_tenant_login 013_alert_cases 001_rls 002_auth_lookup 003_grants 004_checks 005_ops_checks 007_branch_limit 012_goods_receipts 013_inventory_posting 014_place_check 015_receipt_cost 016_price_status 017_global_library; do
+  for f in 008_prices 009_catalog_price_stock 010_platform 011_tenant_login 013_alert_cases 001_rls 002_auth_lookup 003_grants 004_checks 005_ops_checks 007_branch_limit 012_goods_receipts 013_inventory_posting 014_place_check 015_receipt_cost 016_price_status 017_global_library 018_optional_batch 019_supplier_batches 020_purchase_line_unit; do
     [ -f "infra/sql/$f.sql" ] || continue
     sql -i "infra/sql/$f.sql" >/tmp/dawaa-sql.out 2>&1 && ok "$f.sql" || { cat /tmp/dawaa-sql.out; die "$f.sql failed"; }
   done
