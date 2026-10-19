@@ -137,54 +137,5 @@ IF NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = N'AlertPreferences_te
     FOREIGN KEY (tenantId) REFERENCES dbo.Tenants(id);
 GO
 
-IF OBJECT_ID(N'dbo.AlertCases', N'U') IS NOT NULL
-AND EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantIsolation')
-AND NOT EXISTS (
-  SELECT 1 FROM sys.security_predicates sp
-  INNER JOIN sys.objects o ON o.object_id = sp.target_object_id
-  WHERE o.name = N'AlertCases'
-)
-  ALTER SECURITY POLICY dbo.TenantIsolation
-    ADD FILTER PREDICATE dbo.fn_rls_tenant(tenantId) ON dbo.AlertCases,
-    ADD BLOCK PREDICATE dbo.fn_rls_tenant(tenantId) ON dbo.AlertCases AFTER INSERT,
-    ADD BLOCK PREDICATE dbo.fn_rls_tenant(tenantId) ON dbo.AlertCases AFTER UPDATE;
-GO
+-- RLS predicates for alert tables are applied by 001_rls.sql (runs after this script).
 
-IF OBJECT_ID(N'dbo.AlertEvents', N'U') IS NOT NULL
-AND EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantIsolation')
-AND NOT EXISTS (
-  SELECT 1 FROM sys.security_predicates sp
-  INNER JOIN sys.objects o ON o.object_id = sp.target_object_id
-  WHERE o.name = N'AlertEvents'
-)
-  ALTER SECURITY POLICY dbo.TenantIsolation
-    ADD FILTER PREDICATE dbo.fn_rls_tenant(tenantId) ON dbo.AlertEvents,
-    ADD BLOCK PREDICATE dbo.fn_rls_tenant(tenantId) ON dbo.AlertEvents AFTER INSERT,
-    ADD BLOCK PREDICATE dbo.fn_rls_tenant(tenantId) ON dbo.AlertEvents AFTER UPDATE;
-GO
-
-IF OBJECT_ID(N'dbo.AlertNotices', N'U') IS NOT NULL
-AND EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantIsolation')
-AND NOT EXISTS (
-  SELECT 1 FROM sys.security_predicates sp
-  INNER JOIN sys.objects o ON o.object_id = sp.target_object_id
-  WHERE o.name = N'AlertNotices'
-)
-  ALTER SECURITY POLICY dbo.TenantIsolation
-    ADD FILTER PREDICATE dbo.fn_rls_tenant(tenantId) ON dbo.AlertNotices,
-    ADD BLOCK PREDICATE dbo.fn_rls_tenant(tenantId) ON dbo.AlertNotices AFTER INSERT,
-    ADD BLOCK PREDICATE dbo.fn_rls_tenant(tenantId) ON dbo.AlertNotices AFTER UPDATE;
-GO
-
-IF OBJECT_ID(N'dbo.AlertPreferences', N'U') IS NOT NULL
-AND EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantIsolation')
-AND NOT EXISTS (
-  SELECT 1 FROM sys.security_predicates sp
-  INNER JOIN sys.objects o ON o.object_id = sp.target_object_id
-  WHERE o.name = N'AlertPreferences'
-)
-  ALTER SECURITY POLICY dbo.TenantIsolation
-    ADD FILTER PREDICATE dbo.fn_rls_tenant(tenantId) ON dbo.AlertPreferences,
-    ADD BLOCK PREDICATE dbo.fn_rls_tenant(tenantId) ON dbo.AlertPreferences AFTER INSERT,
-    ADD BLOCK PREDICATE dbo.fn_rls_tenant(tenantId) ON dbo.AlertPreferences AFTER UPDATE;
-GO

@@ -156,28 +156,5 @@ IF NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = N'StockLots_receiptLi
     FOREIGN KEY (tenantId, receiptLineId) REFERENCES dbo.GoodsReceiptLines(tenantId, id);
 GO
 
-IF OBJECT_ID(N'dbo.GoodsReceipts', N'U') IS NOT NULL
-AND EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantIsolation')
-AND NOT EXISTS (
-  SELECT 1 FROM sys.security_predicates sp
-  INNER JOIN sys.objects o ON o.object_id = sp.target_object_id
-  WHERE o.name = N'GoodsReceipts'
-)
-  ALTER SECURITY POLICY dbo.TenantIsolation
-    ADD FILTER PREDICATE dbo.fn_rls_tenant(tenantId) ON dbo.GoodsReceipts,
-    ADD BLOCK PREDICATE dbo.fn_rls_tenant(tenantId) ON dbo.GoodsReceipts AFTER INSERT,
-    ADD BLOCK PREDICATE dbo.fn_rls_tenant(tenantId) ON dbo.GoodsReceipts AFTER UPDATE;
-GO
+-- RLS predicates for goods-receipt tables are applied by 001_rls.sql (runs after this script).
 
-IF OBJECT_ID(N'dbo.GoodsReceiptLines', N'U') IS NOT NULL
-AND EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantIsolation')
-AND NOT EXISTS (
-  SELECT 1 FROM sys.security_predicates sp
-  INNER JOIN sys.objects o ON o.object_id = sp.target_object_id
-  WHERE o.name = N'GoodsReceiptLines'
-)
-  ALTER SECURITY POLICY dbo.TenantIsolation
-    ADD FILTER PREDICATE dbo.fn_rls_tenant(tenantId) ON dbo.GoodsReceiptLines,
-    ADD BLOCK PREDICATE dbo.fn_rls_tenant(tenantId) ON dbo.GoodsReceiptLines AFTER INSERT,
-    ADD BLOCK PREDICATE dbo.fn_rls_tenant(tenantId) ON dbo.GoodsReceiptLines AFTER UPDATE;
-GO

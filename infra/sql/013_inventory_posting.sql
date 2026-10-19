@@ -156,41 +156,5 @@ IF NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = N'StorageLocations_br
     FOREIGN KEY (tenantId, branchId) REFERENCES dbo.Branches(tenantId, id);
 GO
 
-IF OBJECT_ID(N'dbo.InventoryEntries', N'U') IS NOT NULL
-AND EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantIsolation')
-AND NOT EXISTS (
-  SELECT 1 FROM sys.security_predicates sp
-  INNER JOIN sys.objects o ON o.object_id = sp.target_object_id
-  WHERE o.name = N'InventoryEntries'
-)
-  ALTER SECURITY POLICY dbo.TenantIsolation
-    ADD FILTER PREDICATE dbo.fn_rls_tenant(tenantId) ON dbo.InventoryEntries,
-    ADD BLOCK PREDICATE dbo.fn_rls_tenant(tenantId) ON dbo.InventoryEntries AFTER INSERT,
-    ADD BLOCK PREDICATE dbo.fn_rls_tenant(tenantId) ON dbo.InventoryEntries AFTER UPDATE;
-GO
+-- RLS predicates for inventory/storage tables are applied by 001_rls.sql (runs after this script).
 
-IF OBJECT_ID(N'dbo.InventoryEntryLines', N'U') IS NOT NULL
-AND EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantIsolation')
-AND NOT EXISTS (
-  SELECT 1 FROM sys.security_predicates sp
-  INNER JOIN sys.objects o ON o.object_id = sp.target_object_id
-  WHERE o.name = N'InventoryEntryLines'
-)
-  ALTER SECURITY POLICY dbo.TenantIsolation
-    ADD FILTER PREDICATE dbo.fn_rls_tenant(tenantId) ON dbo.InventoryEntryLines,
-    ADD BLOCK PREDICATE dbo.fn_rls_tenant(tenantId) ON dbo.InventoryEntryLines AFTER INSERT,
-    ADD BLOCK PREDICATE dbo.fn_rls_tenant(tenantId) ON dbo.InventoryEntryLines AFTER UPDATE;
-GO
-
-IF OBJECT_ID(N'dbo.StorageLocations', N'U') IS NOT NULL
-AND EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantIsolation')
-AND NOT EXISTS (
-  SELECT 1 FROM sys.security_predicates sp
-  INNER JOIN sys.objects o ON o.object_id = sp.target_object_id
-  WHERE o.name = N'StorageLocations'
-)
-  ALTER SECURITY POLICY dbo.TenantIsolation
-    ADD FILTER PREDICATE dbo.fn_rls_tenant(tenantId) ON dbo.StorageLocations,
-    ADD BLOCK PREDICATE dbo.fn_rls_tenant(tenantId) ON dbo.StorageLocations AFTER INSERT,
-    ADD BLOCK PREDICATE dbo.fn_rls_tenant(tenantId) ON dbo.StorageLocations AFTER UPDATE;
-GO
