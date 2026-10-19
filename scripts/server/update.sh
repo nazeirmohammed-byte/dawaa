@@ -57,7 +57,9 @@ migrate_db() {
     sql -i "infra/sql/$f.sql" >/tmp/dawaa-sql.out 2>&1 && ok "pre-push $f.sql" || { cat /tmp/dawaa-sql.out; die "$f.sql failed"; }
   done
 
-  if (cd packages/db && DATABASE_URL="$MIG_URL" pnpm exec prisma db push --skip-generate) >/tmp/dawaa-push.out 2>&1; then
+  # --accept-data-loss: unique/index sync warnings (e.g. PlatformUsers.phone) are expected;
+  # 011_tenant_login already applies the filtered unique index. Never use --force-reset here.
+  if (cd packages/db && DATABASE_URL="$MIG_URL" pnpm exec prisma db push --skip-generate --accept-data-loss) >/tmp/dawaa-push.out 2>&1; then
     ok "prisma db push"
   elif grep -q "Cannot alter column 'rowVersion'" /tmp/dawaa-push.out; then
     ok "prisma db push: rowVersion columns left unchanged (expected); SQL scripts apply the rest"
