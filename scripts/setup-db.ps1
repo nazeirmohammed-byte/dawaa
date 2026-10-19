@@ -121,23 +121,27 @@ if ($categoryId -eq 'NULL' -or $categoryId -eq '') {
   Invoke-SqlFile (Join-Path $root 'infra\sql\006_ops_tables.sql')
 }
 
-Write-Host 'Applying row-level security, login procedure, grants, and checks...'
+Write-Host 'Applying schema scripts, then RLS / grants / checks...'
 Invoke-SqlFile (Join-Path $root 'infra\sql\008_prices.sql')
 Invoke-SqlFile (Join-Path $root 'infra\sql\009_catalog_price_stock.sql')
 Invoke-SqlFile (Join-Path $root 'infra\sql\010_platform.sql')
 Invoke-SqlFile (Join-Path $root 'infra\sql\011_tenant_login.sql')
+Invoke-SqlFile (Join-Path $root 'infra\sql\007_branch_limit.sql')
+Invoke-SqlFile (Join-Path $root 'infra\sql\013_alert_cases.sql')
+Invoke-SqlFile (Join-Path $root 'infra\sql\012_goods_receipts.sql')
+Invoke-SqlFile (Join-Path $root 'infra\sql\013_inventory_posting.sql')
+Invoke-SqlFile (Join-Path $root 'infra\sql\014_place_check.sql')
+Invoke-SqlFile (Join-Path $root 'infra\sql\015_receipt_cost.sql')
+Invoke-SqlFile (Join-Path $root 'infra\sql\016_price_status.sql')
+Invoke-SqlFile (Join-Path $root 'infra\sql\017_global_library.sql')
+Invoke-SqlFile (Join-Path $root 'infra\sql\018_optional_batch.sql')
+Invoke-SqlFile (Join-Path $root 'infra\sql\019_supplier_batches.sql')
+Invoke-SqlFile (Join-Path $root 'infra\sql\020_purchase_line_unit.sql')
 Invoke-SqlFile (Join-Path $root 'infra\sql\001_rls.sql')
 Invoke-SqlFile (Join-Path $root 'infra\sql\002_auth_lookup.sql')
 Invoke-SqlFile (Join-Path $root 'infra\sql\003_grants.sql')
 Invoke-SqlFile (Join-Path $root 'infra\sql\004_checks.sql')
 Invoke-SqlFile (Join-Path $root 'infra\sql\005_ops_checks.sql')
-Invoke-SqlFile (Join-Path $root 'infra\sql\007_branch_limit.sql')
-Invoke-SqlFile (Join-Path $root 'infra\sql\012_goods_receipts.sql')
-Invoke-SqlFile (Join-Path $root 'infra\sql\014_place_check.sql')
-Invoke-SqlFile (Join-Path $root 'infra\sql\017_global_library.sql')
-Invoke-SqlFile (Join-Path $root 'infra\sql\018_optional_batch.sql')
-Invoke-SqlFile (Join-Path $root 'infra\sql\019_supplier_batches.sql')
-Invoke-SqlFile (Join-Path $root 'infra\sql\020_purchase_line_unit.sql')
 
 Write-Host 'Seeding demo tenant...'
 corepack pnpm --filter @dawaa/shared build

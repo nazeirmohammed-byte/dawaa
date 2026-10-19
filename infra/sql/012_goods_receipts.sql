@@ -157,6 +157,7 @@ IF NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = N'StockLots_receiptLi
 GO
 
 IF OBJECT_ID(N'dbo.GoodsReceipts', N'U') IS NOT NULL
+AND EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantIsolation')
 AND NOT EXISTS (
   SELECT 1 FROM sys.security_predicates sp
   INNER JOIN sys.objects o ON o.object_id = sp.target_object_id
@@ -169,6 +170,7 @@ AND NOT EXISTS (
 GO
 
 IF OBJECT_ID(N'dbo.GoodsReceiptLines', N'U') IS NOT NULL
+AND EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantIsolation')
 AND NOT EXISTS (
   SELECT 1 FROM sys.security_predicates sp
   INNER JOIN sys.objects o ON o.object_id = sp.target_object_id
