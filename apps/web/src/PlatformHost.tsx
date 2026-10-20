@@ -3,6 +3,7 @@ import { Navigate } from 'react-router-dom';
 import { AdminShell } from '../../admin/src/App';
 import { api } from '../../admin/src/api';
 import type { PlatformLang } from '../../admin/src/locale';
+import '../../admin/src/index.css';
 import i18n, { applyLanguage } from './i18n';
 import { useUi } from './ui';
 

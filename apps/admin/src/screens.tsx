@@ -212,42 +212,25 @@ export function SignupQueue() {
     );
   }
   return (
-    <div className="stack" id="signups">
-      <div className="page-head">
-        <h2>{tx(lang, 'صيدليات تنتظر الموافقة', 'Pharmacies waiting for approval')}</h2>
-        <p>{tx(lang, 'هذه حسابات فُتحت وما زال الدخول مغلقاً. الطلب الجديد يبدأ من «تسجيل طلب»، لا من هنا.', 'These accounts were opened and still cannot sign in. A new pharmacy starts from Enter a request, not from here.')}</p>
-      </div>
+    <div className="board-panel" id="signups">
+      <header>
+        <h2>{tx(lang, 'صيدليات تنتظر الموافقة', 'Waiting for approval')}</h2>
+      </header>
       {error ? <p className="error">{error}</p> : null}
-      {board.data.map((row) => {
-        const management = String(row.management) === 'SHARED'
-          ? tx(lang, 'مشتركة: تقرير الصيدلية يجمع الفروع', 'Shared: the pharmacy report combines branches')
-          : tx(lang, 'مستقلة: مخزون وتقرير لكل فرع', 'Independent: stock and a report for each branch');
-        return (
-          <article key={String(row.id)} className="panel">
-            <p className="badge-row">
-              <strong>{lang === 'ar' ? String(row.tradeNameAr) : String(row.tradeNameEn || row.tradeNameAr)}</strong>
-              <Badge value="PENDING" label={statusLabel(lang, 'PENDING')} />
-            </p>
-            <dl className="facts">
-              <Fact label={tx(lang, 'الاسم بالعربية', 'Arabic name')}>{String(row.tradeNameAr)}</Fact>
-              <Fact label={tx(lang, 'الاسم بالإنجليزية', 'English name')}>{String(row.tradeNameEn || '—')}</Fact>
-              <Fact label={tx(lang, 'المالك', 'Owner')}>{String(row.ownerName || '—')}</Fact>
-              <Fact label={tx(lang, 'النوع', 'Type')}>{statusLabel(lang, String(row.type))}</Fact>
-              <Fact wide label={tx(lang, 'البريد', 'Email')}><Ltr value={String(row.email ?? '')} /></Fact>
-              <Fact label={tx(lang, 'الهاتف', 'Phone')}><Ltr value={String(row.phone ?? '')} /></Fact>
-              <Fact label={tx(lang, 'عدد الفروع', 'Branches')}>{String(row.branchLimit ?? '')}</Fact>
-              <Fact label={tx(lang, 'الفرع', 'Branch')}>{lang === 'ar' ? String(row.branchNameAr || '—') : String(row.branchNameEn || row.branchNameAr || '—')}</Fact>
-              <Fact wide label={tx(lang, 'إدارة الفروع', 'Branch management')}>{management}</Fact>
-              <Fact label={tx(lang, 'وقت الطلب', 'Requested')}>{when(lang, row.createdAt)}</Fact>
-            </dl>
-            <div className="tools">
-              <button type="button" onClick={() => decide(String(row.id), 'approve')}>{tx(lang, 'اعتماد الدخول', 'Approve sign-in')}</button>
-              <button type="button" className="danger" onClick={() => decide(String(row.id), 'reject')}>{tx(lang, 'رفض الحساب', 'Reject account')}</button>
-              <Link to={`/admin/tenants/${String(row.id)}`}>{tx(lang, 'كل البيانات', 'Full record')}</Link>
-            </div>
-          </article>
-        );
-      })}
+      {board.data.map((row) => (
+        <div key={String(row.id)} className="work-row">
+          <div>
+            <strong>{lang === 'ar' ? String(row.tradeNameAr) : String(row.tradeNameEn || row.tradeNameAr)}</strong>
+            <small><Ltr value={String(row.phone ?? '')} /> · {String(row.ownerName || '—')}</small>
+          </div>
+          <Badge value="PENDING" label={statusLabel(lang, 'PENDING')} />
+          <div className="row-actions">
+            <button type="button" onClick={() => decide(String(row.id), 'approve')}>{tx(lang, 'اعتماد', 'Approve')}</button>
+            <button type="button" className="danger" onClick={() => decide(String(row.id), 'reject')}>{tx(lang, 'رفض', 'Reject')}</button>
+            <Link to={`/admin/tenants/${String(row.id)}`}>{tx(lang, 'التفاصيل', 'Details')}</Link>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -259,83 +242,98 @@ export function DashboardPage() {
   if (board.loading) return <p>{tx(lang, 'جار التحميل…', 'Loading…')}</p>;
   if (board.error) return <p className="error">{board.error}</p>;
   const data = board.data ?? {};
-  const cards: { id: string; ar: string; en: string; value: unknown }[] = [
-    { id: 'total', ar: 'الصيدليات', en: 'Pharmacies', value: data.totalTenants },
-    { id: 'active', ar: 'النشطة', en: 'Active', value: data.activeTenants },
-    { id: 'trial', ar: 'التجريبية', en: 'Trial', value: data.trialTenants },
-    { id: 'requests', ar: 'طلبات معلقة', en: 'Pending requests', value: data.pendingRequests },
-    { id: 'verify', ar: 'تحقق معلق', en: 'Pending checks', value: data.pendingVerification },
-    { id: 'suspended', ar: 'موقوفة', en: 'Suspended', value: data.suspendedTenants },
-    { id: 'overdue', ar: 'فواتير متأخرة', en: 'Overdue invoices', value: data.overdueInvoices },
-    { id: 'mrr', ar: 'الإيراد الشهري', en: 'Monthly revenue', value: data.monthlyRecurringRevenue },
-    { id: 'items', ar: 'أصناف بانتظار المراجعة', en: 'Items to review', value: data.pendingItems },
+  const health = (data.systemHealth as Row | undefined) ?? {};
+  const cards: { id: string; ar: string; en: string; value: unknown; tone: string; to: string }[] = [
+    { id: 'total', ar: 'الصيدليات', en: 'Pharmacies', value: data.totalTenants, tone: '', to: '/admin/tenants' },
+    { id: 'active', ar: 'النشطة', en: 'Active', value: data.activeTenants, tone: 'ok', to: '/admin/tenants?status=ACTIVE' },
+    { id: 'trial', ar: 'التجريبية', en: 'Trial', value: data.trialTenants, tone: 'info', to: '/admin/tenants?status=TRIAL' },
+    { id: 'requests', ar: 'طلبات معلقة', en: 'Pending', value: data.pendingRequests, tone: 'warn', to: '/admin/tenants?view=requests' },
+    { id: 'overdue', ar: 'فواتير متأخرة', en: 'Overdue', value: data.overdueInvoices, tone: 'danger', to: '/admin/billing/invoices' },
+    { id: 'mrr', ar: 'الإيراد الشهري', en: 'Monthly revenue', value: data.monthlyRecurringRevenue, tone: '', to: '/admin/billing/invoices' },
   ];
   const partners = (data.expiringPartners as Row[] | undefined) ?? [];
   const openRequests = (work.data ?? []).filter((row) => !['TENANT_CREATED', 'ACTIVE', 'REJECTED'].includes(String(row.status)));
-  const jumps: { to: string; ar: string; en: string }[] = [
-    { to: '/admin/tenants?view=requests', ar: 'الصيدليات والطلبات', en: 'Pharmacies and requests' },
-    { to: '/admin/pharmacy-accounts', ar: 'حسابات الدخول', en: 'Sign-in accounts' },
-    { to: '/admin/catalog/library', ar: 'تنزيل الأدوية وتحديثها', en: 'Download and update medicines' },
-    { to: '/admin/billing/invoices', ar: 'فواتير الاشتراك', en: 'Subscription invoices' },
+  const healthRows: { ar: string; en: string; value: unknown; to: string }[] = [
+    { ar: 'موقوف', en: 'Suspended', value: health.suspended ?? data.suspendedTenants ?? 0, to: '/admin/tenants?status=SUSPENDED' },
+    { ar: 'قراءة فقط', en: 'Read only', value: health.readOnly ?? 0, to: '/admin/tenants' },
+    { ar: 'اشتراك ينتهي', en: 'Ending soon', value: health.expiringSubscriptions ?? 0, to: '/admin/billing/invoices' },
+    { ar: 'دفع فاشل', en: 'Failed payment', value: health.failedPayments ?? 0, to: '/admin/payment-proofs' },
+    { ar: 'تحقق معلق', en: 'Pending checks', value: data.pendingVerification ?? 0, to: '/admin/tenants?view=requests' },
+    { ar: 'أصناف للمراجعة', en: 'Items to review', value: data.pendingItems ?? 0, to: '/admin/catalog/new-item-requests' },
   ];
   return (
-    <section>
-      <div className="page-head">
-        <h1>{tx(lang, 'عمل المالك', 'Owner work')}</h1>
-        <p>{tx(lang, 'طلب من صفحة الدخول يفتح تجربة 14 يوماً فوراً. من سجل الصيدلية تُعتمد كنسخة قياسية أو تُلغى التجربة أو تُمدَّد.', 'A request from the sign-in page opens a 14-day trial at once. From the pharmacy record it becomes the standard edition, or the trial is cancelled or extended.')}</p>
-      </div>
-      <ol className="steps">
-        <li className="step">{tx(lang, '١ طلب الاشتراك', '1 Subscription request')}</li>
-        <li className="step">{tx(lang, '٢ مراجعة الترخيص', '2 Check the license')}</li>
-        <li className="step">{tx(lang, '٣ الاعتماد', '3 Approve')}</li>
-        <li className="step">{tx(lang, '٤ إنشاء حساب الدخول', '4 Create the sign-in')}</li>
-        <li className="step">{tx(lang, '٥ تسليم الدخول وتدريب المالك', '5 Hand over the sign-in and train the owner')}</li>
-      </ol>
-      <div className="tools">
-        {jumps.map((jump) => <Link key={jump.to} className="jump" to={jump.to}>{tx(lang, jump.ar, jump.en)}</Link>)}
-        <a className="jump" href="/subscribe?from=admin">{tx(lang, 'تسجيل طلب صيدلية', 'Enter a pharmacy request')}</a>
-      </div>
-      <SignupQueue />
-      <div className="panel">
-        <strong>{tx(lang, 'صحة المنصة', 'Platform health')}</strong>
-        <p>{tx(lang, 'أرقام مجمّعة من الاشتراكات والفواتير. تفاصيل أدوية الصيدليات لا تظهر هنا.', 'Counts from subscriptions and invoices. Pharmacy medicine details stay inside each pharmacy.')}</p>
-        <p>{tx(lang, 'موقوف', 'Suspended')}: {String((data.systemHealth as Row | undefined)?.suspended ?? data.suspendedTenants ?? 0)}</p>
-        <p>{tx(lang, 'قراءة فقط', 'Read only')}: {String((data.systemHealth as Row | undefined)?.readOnly ?? 0)}</p>
-        <p>{tx(lang, 'اشتراك يقارب الانتهاء', 'Subscription ending')}: {String((data.systemHealth as Row | undefined)?.expiringSubscriptions ?? 0)}</p>
-        <p>{tx(lang, 'دفع فاشل', 'Failed payment')}: {String((data.systemHealth as Row | undefined)?.failedPayments ?? 0)}</p>
-        <p>{tx(lang, 'فاتورة متأخرة', 'Overdue invoice')}: {String((data.systemHealth as Row | undefined)?.overdueInvoices ?? data.overdueInvoices ?? 0)}</p>
-        <div className="tools">
-          <Link to="/admin/tenants?status=SUSPENDED">{tx(lang, 'الصيدليات الموقوفة', 'Suspended pharmacies')}</Link>
-          <Link to="/admin/billing/invoices">{tx(lang, 'فواتير الاشتراك', 'Subscription invoices')}</Link>
-        </div>
-      </div>
-      <div className="cards">
+    <section className="board">
+      <div className="board-kpis">
         {cards.map((card) => (
-          <article key={card.id} className="card">
+          <Link key={card.id} to={card.to} className={`kpi-tile ${card.tone}`.trim()}>
             <span>{tx(lang, card.ar, card.en)}</span>
             <strong>{String(card.value ?? 0)}</strong>
+          </Link>
+        ))}
+      </div>
+
+      <div className="board-grid">
+        <div className="board-col">
+          <article className="board-panel">
+            <header>
+              <h2>{tx(lang, 'العمل المطلوب', 'Work queue')}</h2>
+              <a className="jump" href="/subscribe?from=admin">{tx(lang, 'طلب جديد', 'New request')}</a>
+            </header>
+            {openRequests.length === 0 ? (
+              <p className="empty-line">{tx(lang, 'لا يوجد طلب مفتوح.', 'No open request.')}</p>
+            ) : openRequests.map((row) => (
+              <div key={String(row.id)} className="work-row">
+                <div>
+                  <strong>{String(row.tradeNameAr)}</strong>
+                  <small>{String(row.ownerName)}</small>
+                </div>
+                <Badge value={String(row.status)} label={statusLabel(lang, String(row.status))} />
+                <Link className="raised" to={`/admin/subscription-requests/${String(row.id)}`}>{tx(lang, 'متابعة', 'Open')}</Link>
+              </div>
+            ))}
           </article>
-        ))}
-        <article className="card">
-          <span>{tx(lang, 'رخص شركاء قاربت الانتهاء', 'Partner licenses due')}</span>
-          <strong>{partners.length}</strong>
-        </article>
-      </div>
-      <div className="panel partner-list">
-        <strong>{tx(lang, 'رخص قاربت الانتهاء', 'Licenses due soon')}</strong>
-        {partners.length === 0 ? <p>{tx(lang, 'لا توجد رخص قريبة من الانتهاء.', 'No licenses are close to expiry.')}</p> : partners.map((row) => (
-          <p key={String(row.id)}><span>{String(row.name)}</span><b>{String(row.expiresOn)}</b></p>
-        ))}
-      </div>
-      <div className="panel">
-        <strong>{tx(lang, 'طلبات بانتظار إجراء', 'Requests waiting for you')}</strong>
-        {openRequests.length === 0 ? <p>{tx(lang, 'لا يوجد طلب مفتوح. سجّل طلباً جديداً أو انتظر صيدلية.', 'No open request. Enter one, or wait for a pharmacy.')}</p> : openRequests.map((row) => (
-          <p key={String(row.id)}>
-            <span>{String(row.tradeNameAr)} — {String(row.ownerName)}</span>
-            <Badge value={String(row.status)} label={statusLabel(lang, String(row.status))} />
-            <Link className="raised continue" to={`/admin/subscription-requests/${String(row.id)}`}>{tx(lang, 'متابعة', 'Continue')}</Link>
-          </p>
-        ))}
+          <SignupQueue />
+        </div>
+
+        <aside className="board-col">
+          <article className="board-panel">
+            <header>
+              <h2>{tx(lang, 'صحة المنصة', 'Platform health')}</h2>
+            </header>
+            <ul className="health-list">
+              {healthRows.map((row) => (
+                <li key={row.en}>
+                  <Link to={row.to}>
+                    <span>{tx(lang, row.ar, row.en)}</span>
+                    <b className={Number(row.value) > 0 ? 'hot' : undefined}>{String(row.value ?? 0)}</b>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </article>
+          <article className="board-panel">
+            <header>
+              <h2>{tx(lang, 'اختصارات', 'Shortcuts')}</h2>
+            </header>
+            <nav className="shortcut-list">
+              <Link to="/admin/tenants">{tx(lang, 'الصيدليات', 'Pharmacies')}</Link>
+              <Link to="/admin/pharmacy-accounts">{tx(lang, 'حسابات الدخول', 'Sign-in accounts')}</Link>
+              <Link to="/admin/catalog/library">{tx(lang, 'الدليل الدوائي', 'Medicine library')}</Link>
+              <Link to="/admin/billing/invoices">{tx(lang, 'الفواتير', 'Invoices')}</Link>
+              <Link to="/admin/settings">{tx(lang, 'الإعدادات', 'Settings')}</Link>
+            </nav>
+          </article>
+          <article className="board-panel">
+            <header>
+              <h2>{tx(lang, 'رخص الشركاء', 'Partner licenses')}</h2>
+            </header>
+            {partners.length === 0 ? (
+              <p className="empty-line">{tx(lang, 'لا توجد رخص قريبة من الانتهاء.', 'No licenses due soon.')}</p>
+            ) : partners.map((row) => (
+              <p key={String(row.id)} className="license-row"><span>{String(row.name)}</span><b>{String(row.expiresOn)}</b></p>
+            ))}
+          </article>
+        </aside>
       </div>
     </section>
   );
@@ -351,21 +349,10 @@ export function TenantsPage() {
   const board = useLoad<{ rows: Row[]; total: number }>(`/api/v1/platform/tenants?q=${encodeURIComponent(query)}&status=${status}`);
   const rows = board.data?.rows ?? [];
   const headers = lang === 'ar'
-    ? ['الصيدلية', 'رمز الدخول', 'النوع', 'المالك', 'الهاتف', 'البريد', 'الباقة', 'الحساب', 'التحقق', 'الفروع', 'المستخدمون', 'الأجهزة', 'آخر دخول', 'تاريخ الإنشاء', 'فتح']
-    : ['Pharmacy', 'Code', 'Type', 'Owner', 'Phone', 'Email', 'Plan', 'Account', 'Check', 'Branches', 'Users', 'Devices', 'Last sign-in', 'Created', 'Open'];
+    ? ['الصيدلية', 'الرمز', 'المالك', 'الهاتف', 'الباقة', 'الحالة']
+    : ['Pharmacy', 'Code', 'Owner', 'Phone', 'Plan', 'Status'];
   return (
     <section>
-      <div className="page-head">
-        <h1>{tx(lang, 'الصيدليات', 'Pharmacies')}</h1>
-        <p>{tx(lang, 'طلب صفحة الدخول يفتح تجربة 14 يوماً. الطلب الذي تدخله أنت يبقى للمراجعة.', 'A request from the sign-in page opens a 14-day trial. A request you enter here stays for review.')}</p>
-      </div>
-      <ol className="steps">
-        <li className={view === 'requests' ? 'step on' : 'step'}>{tx(lang, '١ طلب الاشتراك', '1 Subscription request')}</li>
-        <li className="step">{tx(lang, '٢ مراجعة الترخيص', '2 Check the license')}</li>
-        <li className="step">{tx(lang, '٣ الاعتماد', '3 Approve')}</li>
-        <li className="step">{tx(lang, '٤ إنشاء حساب الدخول', '4 Create the sign-in')}</li>
-        <li className={view === 'pharmacies' ? 'step on' : 'step'}>{tx(lang, '٥ تسليم الدخول وتدريب المالك', '5 Hand over the sign-in and train the owner')}</li>
-      </ol>
       <div className="tools">
         <button type="button" className={view === 'requests' ? 'primary' : 'ghost'} onClick={() => setParams({ view: 'requests' })}>{tx(lang, 'الطلبات', 'Requests')}</button>
         <button type="button" className={view === 'pharmacies' ? 'primary' : 'ghost'} onClick={() => setParams({})}>{tx(lang, 'الصيدليات', 'Pharmacies')}</button>
@@ -384,6 +371,7 @@ export function TenantsPage() {
         <button type="submit">{tx(lang, 'بحث', 'Search')}</button>
       </form>
       {board.loading ? <p>{tx(lang, 'جار التحميل…', 'Loading…')}</p> : board.error ? <p className="error">{board.error}</p> : rows.length === 0 ? <p>{tx(lang, 'لا توجد صيدليات.', 'No pharmacies.')}</p> : (
+        <div className="table-scroll">
         <table>
           <thead>
             <tr>{headers.map((cell) => <th key={cell || 'open'}>{cell}</th>)}</tr>
@@ -395,33 +383,25 @@ export function TenantsPage() {
               const waiting = check === 'PENDING';
               const rejected = check === 'REJECTED' || account === 'SUSPENDED' || account === 'CANCELLED';
               const tone = waiting ? 'wait' : rejected ? 'bad' : account === 'ACTIVE' ? 'ok' : account === 'TRIAL' ? 'trial' : '';
-              const kind = String(row.type) === 'GROUP' ? 'group' : 'single';
               return (
                 <tr key={String(row.id)} className={tone ? `tone-${tone}` : undefined}>
-                  <td>{lang === 'ar' ? String(row.tradeNameAr) : String(row.tradeNameEn || row.tradeNameAr)}</td>
+                  <td>
+                    <Link className="name-link" to={`/admin/tenants/${String(row.id)}`}>
+                      {lang === 'ar' ? String(row.tradeNameAr) : String(row.tradeNameEn || row.tradeNameAr)}
+                    </Link>
+                    <small className="cell-sub">{statusLabel(lang, String(row.type))}</small>
+                  </td>
                   <td><Ltr value={String(row.accountCode ?? '')} /></td>
-                  <td><span className={`chip ${kind}`}>{statusLabel(lang, String(row.type))}</span></td>
                   <td>{String(row.ownerName)}</td>
                   <td><Ltr value={String(row.phone ?? '')} /></td>
-                  <td><Ltr value={String(row.email ?? '')} /></td>
                   <td>{row.plan ? <span className="chip plan">{statusLabel(lang, String(row.plan))}</span> : '—'}</td>
                   <td><Badge value={waiting ? 'PENDING' : account} label={waiting ? tx(lang, 'بانتظار الموافقة', 'Waiting') : statusLabel(lang, account)} /></td>
-                  <td><Badge value={check} label={statusLabel(lang, check)} /></td>
-                  <td>{String(row.branchCount)}</td>
-                  <td>{String(row.userCount)}</td>
-                  <td>{String(row.deviceCount)}</td>
-                  <td>{when(lang, row.lastLoginAt)}</td>
-                  <td>{day(lang, row.createdAt)}</td>
-                  <td>
-                    <Link className={waiting ? 'raised continue' : 'raised'} to={`/admin/tenants/${String(row.id)}`}>
-                      {waiting ? tx(lang, 'متابعة', 'Continue') : tx(lang, 'إدارة', 'Manage')}
-                    </Link>
-                  </td>
                 </tr>
               );
             })}
           </tbody>
         </table>
+        </div>
       )}
       </>)}
     </section>
@@ -765,12 +745,6 @@ export function RequestsPage({ embedded = false }: { embedded?: boolean }) {
   ];
   return (
     <section>
-      {embedded ? null : (
-        <div className="page-head">
-          <h1>{tx(lang, 'طلبات الاشتراك', 'Join requests')}</h1>
-          <p>{tx(lang, 'الصيدلية ترسل الطلب، وأنت تراجعه ثم تنشئ حساب الدخول. الترتيب ثابت: استلام، مراجعة الترخيص، اعتماد، إنشاء الحساب.', 'A pharmacy sends the request. You review it, then create the sign-in. The order is fixed: receive, check the license, approve, create the account.')}</p>
-        </div>
-      )}
       <div className="tools">
         {filters.map(([code, ar, en, tone]) => (
           <button key={code || 'all'} type="button" className={status === code ? `pick ${tone}` : 'ghost'} onClick={() => setStatus(code)}>{tx(lang, ar, en)}</button>
@@ -778,6 +752,7 @@ export function RequestsPage({ embedded = false }: { embedded?: boolean }) {
         {embedded ? null : <a className="jump" href="/subscribe?from=admin">{tx(lang, 'تسجيل طلب جديد', 'Enter a new request')}</a>}
       </div>
       {rows.length === 0 ? <p>{tx(lang, 'لا توجد طلبات في هذا التصفية.', 'No requests in this filter.')}</p> : (
+        <div className="table-scroll">
         <table>
           <thead>
             <tr>
@@ -786,8 +761,6 @@ export function RequestsPage({ embedded = false }: { embedded?: boolean }) {
               <th>{tx(lang, 'الهاتف', 'Phone')}</th>
               <th>{tx(lang, 'الباقة', 'Plan')}</th>
               <th>{tx(lang, 'الحالة', 'Status')}</th>
-              <th>{tx(lang, 'وقت الطلب', 'Requested')}</th>
-              <th>{tx(lang, 'فتح', 'Open')}</th>
             </tr>
           </thead>
           <tbody>
@@ -796,7 +769,6 @@ export function RequestsPage({ embedded = false }: { embedded?: boolean }) {
               const look = requestLook(state);
               const plan = String(row.planCode || '');
               const primary = lang === 'ar' ? String(row.tradeNameAr) : String(row.tradeNameEn || row.tradeNameAr);
-              const secondary = lang === 'ar' ? String(row.tradeNameEn || '') : String(row.tradeNameAr || '');
               const action = look.action === 'create'
                 ? tx(lang, 'إنشاء الحساب', 'Create account')
                 : look.action === 'open'
@@ -805,28 +777,19 @@ export function RequestsPage({ embedded = false }: { embedded?: boolean }) {
               return (
                 <tr key={String(row.id)} className={look.tone ? `tone-${look.tone}` : undefined}>
                   <td>
-                    <strong>{primary}</strong>
-                    {secondary && secondary !== primary ? <small className="sub">{secondary}</small> : null}
-                    {row.city ? <small className="sub">{String(row.city)}</small> : null}
+                    <Link className="name-link" to={`/admin/subscription-requests/${String(row.id)}`}>{primary}</Link>
+                    <small className="sub">{action}</small>
                   </td>
-                  <td>
-                    {String(row.ownerName)}
-                    {row.ownerEmail ? <small className="sub"><Ltr value={String(row.ownerEmail)} /></small> : null}
-                  </td>
+                  <td>{String(row.ownerName)}</td>
                   <td><Ltr value={String(row.ownerPhone ?? '')} /></td>
                   <td>{plan ? <span className={`chip plan ${plan.toLowerCase()}`}>{statusLabel(lang, plan)}</span> : '—'}</td>
                   <td><Badge value={state} label={statusLabel(lang, state)} /></td>
-                  <td>{when(lang, row.createdAt)}</td>
-                  <td>
-                    <Link className={look.action === 'continue' ? 'raised continue' : look.action === 'open' ? 'raised open' : 'raised'} to={`/admin/subscription-requests/${String(row.id)}`}>
-                      {action}
-                    </Link>
-                  </td>
                 </tr>
               );
             })}
           </tbody>
         </table>
+        </div>
       )}
     </section>
   );
@@ -935,16 +898,9 @@ export function RequestDetailPage() {
       {secret ? (
         <div className="panel secret">
           <p>
-            {tx(lang, 'حساب الدخول يظهر مرة واحدة. سجّله الآن ثم سلّمه للمالك. الترتيب: رمز الصيدلية، ثم الجوال، ثم كلمة المرور.', 'The sign-in is shown once. Copy it now and give it to the owner. The order is pharmacy code, then mobile, then password.')}
+            {tx(lang, 'حساب الدخول يظهر مرة واحدة. انسخه الآن وسلّمه للمالك.', 'The sign-in is shown once. Copy it now and give it to the owner.')}
             <strong> {secret}</strong>
           </p>
-          <ol className="steps">
-            <li className="step on">{tx(lang, '١ ادخل معه من شاشة الصيدلية', '1 Sign in with him on the pharmacy screen')}</li>
-            <li className="step">{tx(lang, '٢ الإعدادات: اسم الإيصال وعرض الورق', '2 Settings: receipt name and paper width')}</li>
-            <li className="step">{tx(lang, '٣ مستخدم للكاشير بجواله', '3 A cashier user, with that person’s mobile')}</li>
-            <li className="step">{tx(lang, '٤ أسعار البيع ثم استلام أول بضاعة', '4 Selling prices, then receive the first goods')}</li>
-            <li className="step">{tx(lang, '٥ بيع تجريبي ثم تقرير اليوم', '5 A practice sale, then today’s report')}</li>
-          </ol>
         </div>
       ) : null}
       <label className="field">{tx(lang, 'ملاحظة الإجراء', 'Note for this step')}<textarea value={reason} onChange={(event) => setReason(event.target.value)} /></label>
@@ -1361,7 +1317,7 @@ export function SubscribePage() {
   const homeHref = fromAdmin ? '/admin/subscription-requests' : '/';
   const homeLabel = fromAdmin ? say('رجوع لطلبات الاشتراك', 'Back to join requests') : say('العودة للرئيسية', 'Back to home');
   return (
-    <section className="subscribe-page" dir={lang === 'ar' ? 'rtl' : 'ltr'} lang={lang}>
+    <section className="subscribe-page admin-console" dir={lang === 'ar' ? 'rtl' : 'ltr'} lang={lang}>
       <aside className="subscribe-hero">
         <div>
           <BrandLogo lang={lang} light />
@@ -1572,8 +1528,7 @@ export function CatalogPage() {
   return (
     <section>
       <div className="page-head">
-        <h1>{tx(lang, 'الدليل الدوائي العالمي', 'Global medical library')}</h1>
-        <p>{tx(lang, 'النشر يجعل الصنف قابلاً للبحث في كل صيدلية فوراً. لا يُنسخ سجل الدواء إلى كل صيدلية.', 'Publishing makes the item searchable in every pharmacy at once. The medicine record is not copied into each pharmacy.')}</p>
+        <p>{tx(lang, 'النشر يجعل الصنف قابلاً للبحث في كل صيدلية فوراً.', 'Publishing makes the item searchable in every pharmacy at once.')}</p>
       </div>
       <form className="tools" onSubmit={(event) => { event.preventDefault(); setQuery(q); }}>
         <input value={q} onChange={(event) => setQ(event.target.value)} placeholder={tx(lang, 'اسم أو رمز', 'Name or code')} />
@@ -1608,6 +1563,7 @@ export function CatalogPage() {
         <button type="submit">حفظ وتفعيل</button>
       </form>
       {(board.data?.rows ?? []).length === 0 ? <p>{tx(lang, 'لا توجد نتائج. نزّل الدليل أو غيّر البحث.', 'Nothing matched. Download the library or change the search.')}</p> : (
+        <div className="table-scroll">
         <table>
           <tbody>
             {(board.data?.rows ?? []).map((row) => (
@@ -1620,6 +1576,7 @@ export function CatalogPage() {
             ))}
           </tbody>
         </table>
+        </div>
       )}
     </section>
   );
@@ -1661,8 +1618,7 @@ export function ItemRequestsPage() {
   return (
     <section>
       <div className="page-head">
-        <h1>{tx(lang, 'طلبات الأصناف الجديدة', 'New medicine requests')}</h1>
-        <p>{tx(lang, 'اعتمد الصنف لينشر في الدليل العالمي، أو اربطه بصنف موجود، أو ارفضه.', 'Approve the item so it is published in the global library, link it to an existing item, or reject it.')}</p>
+        <p>{tx(lang, 'اعتمد لينشر للجميع، أو اربط بصنف موجود، أو ارفض.', 'Approve to publish for everyone, link to an existing item, or reject.')}</p>
       </div>
       <Flagged name="reason" label={tx(lang, 'السبب', 'Reason')} message={reasonError}>
         <input value={reason} onChange={(event) => { setReason(event.target.value); setReasonError(''); }} />
@@ -1694,17 +1650,17 @@ export function ItemRequestsPage() {
 }
 
 export function PartnersPage() {
+  const { lang } = usePlatformLang();
   const board = useLoad<Row[]>('/api/v1/platform/partners');
   const [error, setError] = useState('');
   const [form, setForm] = useState({
     name: '', partnerType: 'Supplier/distributor', contactName: '', phone: '', email: '', licenseNumber: '',
     issuedOn: '2026-01-01', expiresOn: '2026-11-01', modules: 'POS', notes: '',
   });
-  if (board.loading) return <p>جار التحميل…</p>;
+  if (board.loading) return <p>{tx(lang, 'جار التحميل…', 'Loading…')}</p>;
   if (board.error) return <p className="error">{board.error}</p>;
   return (
     <section>
-      <h1>الشركاء المرخصون</h1>
       <form className="panel" onSubmit={(event) => {
         event.preventDefault();
         void run(() => api('/api/v1/platform/partners', { method: 'POST', body: JSON.stringify(form) }).then(() => undefined), board.reload, setError);
@@ -1754,12 +1710,12 @@ export function AccountsPage() {
   return (
     <section>
       <div className="page-head">
-        <h1>{tx(lang, 'حسابات الدخول', 'Sign-in accounts')}</h1>
-        <p>{tx(lang, 'كل حساب يدخل باسم المستخدم وهو رقم الجوال، لا البريد. من هنا تعيد كلمة المرور أو توقف الدخول.', 'Each account signs in with the username, which is the mobile number, not the email. Reset the password or stop the sign-in here.')}</p>
+        <p>{tx(lang, 'اسم المستخدم هو رقم الجوال. أعد كلمة المرور أو أوقف الدخول من هنا.', 'The username is the mobile number. Reset the password or stop sign-in here.')}</p>
       </div>
       {error ? <p className="error">{error}</p> : null}
       {secret ? <p className="panel">{tx(lang, 'كلمة المرور الجديدة، تظهر مرة واحدة:', 'New password, shown once:')} <strong>{secret}</strong></p> : null}
       {rows.length === 0 ? <p>{tx(lang, 'لا توجد حسابات.', 'No accounts.')}</p> : (
+        <div className="table-scroll">
         <table>
           <thead>
             <tr>
@@ -1789,6 +1745,7 @@ export function AccountsPage() {
             ))}
           </tbody>
         </table>
+        </div>
       )}
     </section>
   );
@@ -1911,8 +1868,7 @@ export function PlansPage() {
   return (
     <section>
       <div className="page-head">
-        <h1>{tx(lang, 'أسعار الباقات', 'Plan prices')}</h1>
-        <p>{tx(lang, 'حدد سعر كل باقة في الشهر واليوم والسنة وحسب الاستخدام.', 'Set each plan per month, per day, per year, and pay as you go.')}</p>
+        <p>{tx(lang, 'سعر كل باقة في الشهر واليوم والسنة وحسب الاستخدام.', 'Each plan per month, per day, per year, and pay as you go.')}</p>
       </div>
       <PlanPriceSettings />
     </section>
@@ -1920,18 +1876,23 @@ export function PlansPage() {
 }
 
 export function InvoicesPage() {
+  const { lang } = usePlatformLang();
   const board = useLoad<Row[]>('/api/v1/platform/invoices');
   const [error, setError] = useState('');
-  if (board.loading) return <p>جار التحميل…</p>;
+  if (board.loading) return <p>{tx(lang, 'جار التحميل…', 'Loading…')}</p>;
   if (board.error) return <p className="error">{board.error}</p>;
+  const rows = board.data ?? [];
   return (
     <section>
-      <h1>فواتير الاشتراك</h1>
       {error ? <p className="error">{error}</p> : null}
-      {(board.data ?? []).length === 0 ? <p>لا توجد فواتير.</p> : (board.data ?? []).map((row) => (
-        <div key={String(row.id)} className="tools">
-          <span>{String(row.amount)} — <Badge value={String(row.status)} /></span>
-          <button onClick={() => run(() => api('/api/v1/platform/proofs', { method: 'POST', body: JSON.stringify({ invoiceId: row.id, method: 'BANKAK', note: 'إثبات بنكك', fileName: 'proof.txt' }) }).then(() => undefined), board.reload, setError)}>تسجيل إثبات بنكك</button>
+      {rows.length === 0 ? <p>{tx(lang, 'لا توجد فواتير.', 'No invoices.')}</p> : rows.map((row) => (
+        <div key={String(row.id)} className="work-row">
+          <div>
+            <strong dir="ltr">{String(row.amount)}</strong>
+            <small>{String(row.tenantName ?? row.pharmacyName ?? '')}</small>
+          </div>
+          <Badge value={String(row.status)} label={statusLabel(lang, String(row.status))} />
+          <button type="button" onClick={() => run(() => api('/api/v1/platform/proofs', { method: 'POST', body: JSON.stringify({ invoiceId: row.id, method: 'BANKAK', note: 'إثبات بنكك', fileName: 'proof.txt' }) }).then(() => undefined), board.reload, setError)}>{tx(lang, 'تسجيل إثبات', 'Record proof')}</button>
         </div>
       ))}
     </section>
@@ -1939,20 +1900,26 @@ export function InvoicesPage() {
 }
 
 export function ProofsPage() {
+  const { lang } = usePlatformLang();
   const board = useLoad<Row[]>('/api/v1/platform/proofs');
   const [error, setError] = useState('');
-  if (board.loading) return <p>جار التحميل…</p>;
+  if (board.loading) return <p>{tx(lang, 'جار التحميل…', 'Loading…')}</p>;
   if (board.error) return <p className="error">{board.error}</p>;
   const rows = board.data ?? [];
   return (
     <section>
-      <h1>إثباتات الدفع</h1>
       {error ? <p className="error">{error}</p> : null}
-      {rows.length === 0 ? <p>لا توجد إثباتات.</p> : rows.map((row) => (
-        <div key={String(row.id)} className="tools">
-          <span>{String(row.method)} <Badge value={String(row.status)} /></span>
-          <button onClick={() => run(() => api(`/api/v1/platform/proofs/${String(row.id)}/review`, { method: 'POST', body: JSON.stringify({ status: 'APPROVED', reason: 'تم التحقق من الدفع' }) }).then(() => undefined), board.reload, setError)}>اعتماد</button>
-          <button className="ghost" onClick={() => run(() => api(`/api/v1/platform/proofs/${String(row.id)}/review`, { method: 'POST', body: JSON.stringify({ status: 'REJECTED', reason: 'الإثبات غير واضح' }) }).then(() => undefined), board.reload, setError)}>رفض</button>
+      {rows.length === 0 ? <p>{tx(lang, 'لا توجد إثباتات.', 'No proofs.')}</p> : rows.map((row) => (
+        <div key={String(row.id)} className="work-row">
+          <div>
+            <strong>{String(row.method)}</strong>
+            <small>{String(row.tenantName ?? row.invoiceId ?? '')}</small>
+          </div>
+          <Badge value={String(row.status)} label={statusLabel(lang, String(row.status))} />
+          <div className="row-actions">
+            <button type="button" onClick={() => run(() => api(`/api/v1/platform/proofs/${String(row.id)}/review`, { method: 'POST', body: JSON.stringify({ status: 'APPROVED', reason: 'تم التحقق من الدفع' }) }).then(() => undefined), board.reload, setError)}>{tx(lang, 'اعتماد', 'Approve')}</button>
+            <button type="button" className="ghost" onClick={() => run(() => api(`/api/v1/platform/proofs/${String(row.id)}/review`, { method: 'POST', body: JSON.stringify({ status: 'REJECTED', reason: 'الإثبات غير واضح' }) }).then(() => undefined), board.reload, setError)}>{tx(lang, 'رفض', 'Reject')}</button>
+          </div>
         </div>
       ))}
     </section>
@@ -1969,8 +1936,7 @@ export function UsersPage() {
   return (
     <section>
       <div className="page-head">
-        <h1>{tx(lang, 'مستخدمو المنصة', 'Platform users')}</h1>
-        <p>{tx(lang, 'حسابات فريق المنصة، وليست حسابات الصيدليات. كلمة المرور ١٠ أحرف على الأقل.', 'These are platform staff accounts, separate from pharmacy sign-ins. The password needs at least 10 characters.')}</p>
+        <p>{tx(lang, 'حسابات فريق المنصة، وليست حسابات الصيدليات. كلمة المرور ١٠ أحرف على الأقل.', 'Platform staff accounts, not pharmacy sign-ins. Password needs at least 10 characters.')}</p>
       </div>
       <form className="panel" onSubmit={(event) => {
         event.preventDefault();
@@ -1998,16 +1964,35 @@ export function UsersPage() {
 }
 
 export function AuditPage() {
+  const { lang } = usePlatformLang();
   const board = useLoad<Row[]>('/api/v1/platform/audit');
-  if (board.loading) return <p>جار التحميل…</p>;
+  if (board.loading) return <p>{tx(lang, 'جار التحميل…', 'Loading…')}</p>;
   if (board.error) return <p className="error">{board.error}</p>;
   const rows = board.data ?? [];
   return (
     <section>
-      <h1>سجل المنصة</h1>
-      {rows.length === 0 ? <p>لا توجد أحداث.</p> : rows.map((row) => (
-        <p key={String(row.id)}>{String(row.createdAt)} — {String(row.action)} — {String(row.reason)}</p>
-      ))}
+      {rows.length === 0 ? <p>{tx(lang, 'لا توجد أحداث.', 'No events.')}</p> : (
+        <div className="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>{tx(lang, 'الوقت', 'Time')}</th>
+              <th>{tx(lang, 'الإجراء', 'Action')}</th>
+              <th>{tx(lang, 'السبب', 'Reason')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={String(row.id)}>
+                <td>{when(lang, row.createdAt)}</td>
+                <td>{String(row.action)}</td>
+                <td>{String(row.reason ?? '—')}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        </div>
+      )}
     </section>
   );
 }
@@ -2020,8 +2005,7 @@ export function SettingsPage() {
   return (
     <section>
       <div className="page-head">
-        <h1>{tx(lang, 'إعدادات المنصة', 'Platform settings')}</h1>
-        <p>{tx(lang, 'أسعار الاشتراك التي يراها الصيدلي عند طلب التسجيل.', 'The subscription prices a pharmacy sees when it asks to register.')}</p>
+        <p>{tx(lang, 'أسعار الاشتراك التي يراها الصيدلي عند طلب التسجيل.', 'Subscription prices a pharmacy sees when it asks to register.')}</p>
       </div>
       <PlanPriceSettings />
       <p className="hint">{tx(lang, 'التفعيل يتطلب اكتمال التحقق', 'Activation waits until verification is complete')}: {String(board.data.verificationRequired)}</p>

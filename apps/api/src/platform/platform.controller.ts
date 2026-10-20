@@ -68,7 +68,7 @@ export class PlatformPublicController {
 
   @Post('login')
   async login(
-    @Body(new ZodValidationPipe(z.object({ phone: z.string().trim().min(6).max(20), password: z.string().min(10).max(200) })))
+    @Body(new ZodValidationPipe(z.object({ phone: z.string().trim().min(4).max(32), password: z.string().min(10).max(200) })))
     body: { phone: string; password: string },
     @Res({ passthrough: true }) response: Response,
   ) {

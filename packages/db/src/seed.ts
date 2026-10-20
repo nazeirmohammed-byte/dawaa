@@ -213,8 +213,8 @@ async function main(): Promise<void> {
 
 async function seedPlatformAdmin(prisma: PrismaClient): Promise<void> {
   // Single SaaS super account used across local / staging / live seeds.
-  const phone = process.env.PLATFORM_ADMIN_PHONE?.trim() || 'supoer';
-  const email = process.env.PLATFORM_ADMIN_EMAIL?.trim() || 'supoer@dwaa.local';
+  const phone = process.env.PLATFORM_ADMIN_PHONE?.trim() || 'super';
+  const email = process.env.PLATFORM_ADMIN_EMAIL?.trim() || 'super@dwaa.local';
   const password = process.env.PLATFORM_ADMIN_PASSWORD?.trim() || 'Nee3o20077@@';
   if (password.length < 10) {
     throw new Error('PLATFORM_ADMIN_PASSWORD must be at least 10 characters');
@@ -224,7 +224,14 @@ async function seedPlatformAdmin(prisma: PrismaClient): Promise<void> {
   const passwordHash = await hash(password, ARGON2_OPTIONS);
   const found = await prisma.platformUser.findFirst({
     where: {
-      OR: [{ phone }, { email }, { phone: '0915138500' }, { email: { startsWith: 'super+' } }],
+      OR: [
+        { phone },
+        { email },
+        { phone: 'supoer' },
+        { phone: '0915138500' },
+        { email: 'supoer@dwaa.local' },
+        { email: { startsWith: 'super+' } },
+      ],
     },
   });
   if (found) {

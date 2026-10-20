@@ -107,12 +107,11 @@ export function LibraryPage() {
   return (
     <section>
       <div className="page-head">
-        <h1>{tx(lang, 'تنزيل دليل الأدوية', 'Download the medicine library')}</h1>
         <p>
           {tx(
             lang,
-            'قائمة التصنيف الدولي للمواد الدوائية، بالإنجليزية، وبالعربية عندما يكون الاسم منشوراً. الجرعة والشكل يُملآن من قائمة الأدوية الأساسية لمنظمة الصحة العالمية عندما يكون الدواء فيها. لا توجد قائمة عامة مجانية بكل الأسماء التجارية في العالم.',
-            'The international substance list, in English, and in Arabic when a published Arabic name exists. Dose and form are filled from the WHO essential list when that medicine is on it. No free public list contains every brand in every country.',
+            'تنزيل يضيف أصنافاً جديدة للدليل العالمي. تحديث ينعش الأسماء الموجودة.',
+            'Download adds new items to the global library. Update refreshes names already there.',
           )}
         </p>
       </div>

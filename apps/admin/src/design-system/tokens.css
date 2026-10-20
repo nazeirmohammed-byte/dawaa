@@ -1,19 +1,19 @@
 /**
- * DAWAA 2.0 semantic tokens. Legacy variables (--ink, --green, …) map here for gradual migration.
+ * DAWAA Platform Admin tokens.
+ * Navy / indigo console — visually separate from the pharmacy teal app.
  */
-:root {
+.admin-console {
   color-scheme: light;
 
-  /* Brand — crisp, saturated, high-contrast */
-  --dawaa-primary: #087f8c;
-  --dawaa-primary-strong: #066a76;
-  --dawaa-primary-dark: #164e63;
-  --dawaa-secondary: #12a37c;
-  --dawaa-bg: #e9f1f5;
+  --dawaa-primary: #3f4fd8;
+  --dawaa-primary-strong: #2f3cc0;
+  --dawaa-primary-dark: #1a2347;
+  --dawaa-secondary: #6366f1;
+  --dawaa-bg: #eef0f6;
   --dawaa-surface: #ffffff;
-  --dawaa-text: #14263c;
-  --dawaa-text-muted: #4d6376;
-  --dawaa-border: #bfcfdb;
+  --dawaa-text: #101528;
+  --dawaa-text-muted: #3a4460;
+  --dawaa-border: #d4d8e4;
   --dawaa-success: #0b7a5c;
   --dawaa-success-bright: #12a37c;
   --dawaa-success-soft: #d9f4e8;
@@ -23,35 +23,19 @@
   --dawaa-danger: #d92d20;
   --dawaa-danger-dark: #b42318;
   --dawaa-danger-soft: #fee4e2;
-  --dawaa-info: #1d6fe0;
-  --dawaa-info-soft: #dbeafe;
+  --dawaa-info: #3f4fd8;
+  --dawaa-info-soft: #e4e7fb;
   --dawaa-critical: #b42318;
 
-  /* Medicine category accents (illustration frames, chips) */
-  --med-tablets: #1d6fe0;
-  --med-capsules: #7c3aed;
-  --med-syrup: #d97706;
-  --med-suspension: #ea580c;
-  --med-ointment: #db2777;
-  --med-cream: #e11d63;
-  --med-gel: #0d9488;
-  --med-drops: #0284c7;
-  --med-injection: #d92d20;
-  --med-inhaler: #4f46e5;
-  --med-equipment: #52677d;
-  --med-generic: #087f8c;
-
-  /* Typography scale */
   --dawaa-font-display: "IBM Plex Sans Arabic", Inter, "Segoe UI", sans-serif;
   --dawaa-font-body: var(--dawaa-font-display);
-  --dawaa-text-xs: 0.75rem;
-  --dawaa-text-sm: 0.8125rem;
-  --dawaa-text-md: 0.9375rem;
-  --dawaa-text-lg: 1.0625rem;
-  --dawaa-heading-page: clamp(1.25rem, 2vw, 1.75rem);
-  --dawaa-heading-section: 1.125rem;
+  --dawaa-text-xs: 0.8rem;
+  --dawaa-text-sm: 0.9rem;
+  --dawaa-text-md: 1rem;
+  --dawaa-text-lg: 1.125rem;
+  --dawaa-heading-page: 1.45rem;
+  --dawaa-heading-section: 1.12rem;
 
-  /* Spacing & shape */
   --dawaa-space-1: 4px;
   --dawaa-space-2: 8px;
   --dawaa-space-3: 12px;
@@ -60,22 +44,21 @@
   --dawaa-space-6: 24px;
   --dawaa-radius-sm: 8px;
   --dawaa-radius-md: 10px;
-  --dawaa-radius-lg: 14px;
-  --dawaa-shadow-sm: 0 1px 2px rgba(27, 42, 65, 0.06);
-  --dawaa-shadow-md: 0 8px 24px rgba(27, 42, 65, 0.08);
+  --dawaa-radius-lg: 12px;
+  --dawaa-shadow-sm: 0 1px 2px rgba(22, 27, 46, 0.05);
+  --dawaa-shadow-md: 0 10px 28px rgba(22, 27, 46, 0.08);
   --dawaa-focus-ring: 2px solid var(--dawaa-secondary);
 
-  /* Legacy aliases (existing CSS continues to work) */
   --ink: var(--dawaa-text);
   --muted: var(--dawaa-text-muted);
-  --blue: var(--dawaa-primary-dark);
-  --blue-2: var(--dawaa-primary);
+  --blue: var(--dawaa-primary);
+  --blue-2: var(--dawaa-secondary);
   --green: var(--dawaa-success);
   --green-2: #095f46;
   --red: var(--dawaa-danger);
   --red-2: var(--dawaa-danger-dark);
   --mint: var(--dawaa-success-soft);
-  --sky: #d9edf2;
+  --sky: var(--dawaa-info-soft);
   --rose: var(--dawaa-danger-soft);
   --cream: var(--dawaa-bg);
   --paper: var(--dawaa-surface);
@@ -88,45 +71,13 @@
   --watch-soft: var(--dawaa-warning-soft);
   --ok: var(--dawaa-success);
   --ok-soft: var(--dawaa-success-soft);
-  --sidebar: var(--dawaa-primary-dark);
-  --sidebar-text: #eef6f8;
-  --sidebar-active: var(--dawaa-secondary);
+  --sidebar: #151b36;
+  --sidebar-text: #e8ebf7;
+  --sidebar-active: #818cf8;
   --shadow: var(--dawaa-shadow-md);
 }
 
-html[data-theme="dark"] {
-  color-scheme: dark;
-  --dawaa-bg: #090f16;
-  --dawaa-surface: #16212e;
-  --dawaa-text: #f2f7fb;
-  --dawaa-text-muted: #a9bccd;
-  --dawaa-border: #38506a;
-  --dawaa-primary: #45c3cf;
-  --dawaa-primary-dark: #0e2430;
-  --dawaa-secondary: #2ed3a3;
-  --dawaa-success: #2ed3a3;
-  --dawaa-success-soft: #0d3226;
-  --dawaa-warning: #fbbf24;
-  --dawaa-warning-soft: #3d2c07;
-  --dawaa-danger: #ff6b61;
-  --dawaa-danger-dark: #ff8a80;
-  --dawaa-danger-soft: #451512;
-  --dawaa-info: #6cb2ff;
-  --dawaa-info-soft: #122c52;
-  --mint: var(--dawaa-success-soft);
-  --sky: #10303c;
-  --rose: var(--dawaa-danger-soft);
-  --cream: var(--dawaa-bg);
-  --paper: var(--dawaa-surface);
-  --line: var(--dawaa-border);
-  --sidebar: #0a161e;
-  --sidebar-text: #e8eef4;
-  --sidebar-active: var(--dawaa-secondary);
-  --shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-}
-
-/* Direction comes from html[dir]: sidebar follows normal flex row (RTL = right). */
-html[dir="rtl"] .shell,
-html[dir="ltr"] .shell {
+html[dir="rtl"] .admin-console.app,
+html[dir="ltr"] .admin-console.app {
   flex-direction: row;
 }

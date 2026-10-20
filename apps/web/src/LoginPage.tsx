@@ -111,7 +111,7 @@ export function LoginPage() {
     event.preventDefault();
     const bag: FieldMap = {};
     if (!adminPhone.trim()) bag.phone = t('fieldRequired', { label: t('adminUser') });
-    else if (adminPhone.trim().length < 6) bag.phone = t('fieldShort', { count: 6 });
+    else if (adminPhone.trim().length < 4) bag.phone = t('fieldShort', { count: 4 });
     if (!adminPassword) bag.password = t('fieldRequired', { label: t('password') });
     if (Object.keys(bag).length) {
       setError('');

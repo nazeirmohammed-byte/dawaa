@@ -32,6 +32,9 @@ importers:
       '@fontsource/ibm-plex-sans-arabic':
         specifier: ^5.2.5
         version: 5.3.0
+      lucide-react:
+        specifier: 0.511.0
+        version: 0.511.0(react@18.3.1)
       react:
         specifier: ^18.3.1
         version: 18.3.1
