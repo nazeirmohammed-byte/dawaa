@@ -4,6 +4,7 @@ import { ApiError, api, readFile } from './api';
 import { BrandLogo } from './brand';
 import { HelpTip } from './hint';
 import { tx, usePlatformLang, type PlatformLang } from './locale';
+import { NavIcon } from './nav-icons';
 
 type Row = Record<string, unknown>;
 
@@ -243,13 +244,13 @@ export function DashboardPage() {
   if (board.error) return <p className="error">{board.error}</p>;
   const data = board.data ?? {};
   const health = (data.systemHealth as Row | undefined) ?? {};
-  const cards: { id: string; ar: string; en: string; value: unknown; tone: string; to: string }[] = [
-    { id: 'total', ar: 'الصيدليات', en: 'Pharmacies', value: data.totalTenants, tone: '', to: '/admin/tenants' },
-    { id: 'active', ar: 'النشطة', en: 'Active', value: data.activeTenants, tone: 'ok', to: '/admin/tenants?status=ACTIVE' },
-    { id: 'trial', ar: 'التجريبية', en: 'Trial', value: data.trialTenants, tone: 'info', to: '/admin/tenants?status=TRIAL' },
-    { id: 'requests', ar: 'طلبات معلقة', en: 'Pending', value: data.pendingRequests, tone: 'warn', to: '/admin/tenants?view=requests' },
-    { id: 'overdue', ar: 'فواتير متأخرة', en: 'Overdue', value: data.overdueInvoices, tone: 'danger', to: '/admin/billing/invoices' },
-    { id: 'mrr', ar: 'الإيراد الشهري', en: 'Monthly revenue', value: data.monthlyRecurringRevenue, tone: '', to: '/admin/billing/invoices' },
+  const cards: { id: string; ar: string; en: string; value: unknown; tone: string; to: string; icon: string }[] = [
+    { id: 'total', ar: 'الصيدليات', en: 'Pharmacies', value: data.totalTenants, tone: 'info', to: '/admin/tenants', icon: 'pharmacies' },
+    { id: 'active', ar: 'النشطة', en: 'Active', value: data.activeTenants, tone: 'ok', to: '/admin/tenants?status=ACTIVE', icon: 'pharmacies' },
+    { id: 'trial', ar: 'التجريبية', en: 'Trial', value: data.trialTenants, tone: 'info', to: '/admin/tenants?status=TRIAL', icon: 'accounts' },
+    { id: 'requests', ar: 'طلبات معلقة', en: 'Pending', value: data.pendingRequests, tone: 'warn', to: '/admin/tenants?view=requests', icon: 'requests' },
+    { id: 'overdue', ar: 'فواتير متأخرة', en: 'Overdue', value: data.overdueInvoices, tone: 'danger', to: '/admin/billing/invoices', icon: 'invoices' },
+    { id: 'mrr', ar: 'الإيراد الشهري', en: 'Monthly revenue', value: data.monthlyRecurringRevenue, tone: 'money', to: '/admin/billing/invoices', icon: 'plans' },
   ];
   const partners = (data.expiringPartners as Row[] | undefined) ?? [];
   const openRequests = (work.data ?? []).filter((row) => !['TENANT_CREATED', 'ACTIVE', 'REJECTED'].includes(String(row.status)));
@@ -266,6 +267,9 @@ export function DashboardPage() {
       <div className="board-kpis">
         {cards.map((card) => (
           <Link key={card.id} to={card.to} className={`kpi-tile ${card.tone}`.trim()}>
+            <span className="kpi-mark" aria-hidden="true">
+              <NavIcon name={card.icon} size={20} />
+            </span>
             <span>{tx(lang, card.ar, card.en)}</span>
             <strong>{String(card.value ?? 0)}</strong>
           </Link>

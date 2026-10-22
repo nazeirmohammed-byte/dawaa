@@ -5,17 +5,27 @@ import type { AuthTokens } from './auth.service';
 export const ACCESS_COOKIE = 'dawaa_access';
 export const REFRESH_COOKIE = 'dawaa_refresh';
 
-function base() {
+/** Only send auth cookies on API calls — keeps Vite/static requests small. */
+const COOKIE_PATH = '/api';
+
+function base(path: string) {
   return {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'lax' as const,
-    path: '/',
+    path,
   };
 }
 
+function clearLegacyRootCookies(response: Response): void {
+  const legacy = base('/');
+  response.clearCookie(ACCESS_COOKIE, legacy);
+  response.clearCookie(REFRESH_COOKIE, legacy);
+}
+
 export function setAuthCookies(response: Response, tokens: AuthTokens, config: AppConfig): void {
-  const options = base();
+  clearLegacyRootCookies(response);
+  const options = base(COOKIE_PATH);
   response.cookie(ACCESS_COOKIE, tokens.accessToken, {
     ...options,
     maxAge: config.accessTtlSeconds * 1000,
@@ -28,7 +38,8 @@ export function setAuthCookies(response: Response, tokens: AuthTokens, config: A
 
 export function clearAuthCookies(response: Response, config: AppConfig): void {
   void config;
-  const options = base();
+  clearLegacyRootCookies(response);
+  const options = base(COOKIE_PATH);
   response.clearCookie(ACCESS_COOKIE, options);
   response.clearCookie(REFRESH_COOKIE, options);
 }

@@ -14,8 +14,10 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { ApiError, api, formatUserError, type HomeBoard, type ReceiptPreview } from './api';
+import { MedicineIllustration } from './components/MedicineIllustration';
 import { LibraryRequest } from './library-request';
 import { ReceiptSlip } from './ReceiptPage';
+import type { MedicineArtKey } from './design-system/medicine-art';
 import { formatKhartoum, formatMoney, lineAmount, percentAmount, subAmount, sumAmounts } from './locale';
 import { useUi } from './ui';
 
@@ -122,18 +124,18 @@ export function HomeDash() {
         salesCount={home.salesCount}
       />
       <section className="kpi-row kpi-row-5">
-        <Kpi tone="ok" icon={Banknote} label={t('salesTodayKpi')} value={money(home.salesToday)} note={t('sales')} />
-        <Kpi tone="info" icon={ReceiptText} label={t('invoiceCount')} value={String(home.salesCount)} note={t('salesTodayKpi')} />
-        <Kpi tone="watch" icon={PackageMinus} label={t('lowDrugs')} value={String(home.lowCount)} note={t('reorderAction')} />
-        <Kpi tone="watch" icon={CalendarClock} label={t('nearExpiryKpi')} value={String(nearExpiry)} note={t('expiryAlerts')} />
-        <Kpi tone="bad" icon={CalendarX2} label={t('expiredDrugs')} value={String(home.expiredCount)} note={t('expired')} />
+        <Kpi tone="ok" icon={Banknote} art="syrup" label={t('salesTodayKpi')} value={money(home.salesToday)} note={t('sales')} />
+        <Kpi tone="info" icon={ReceiptText} art="sachet" label={t('invoiceCount')} value={String(home.salesCount)} note={t('salesTodayKpi')} />
+        <Kpi tone="watch" icon={PackageMinus} art="tablets" label={t('lowDrugs')} value={String(home.lowCount)} note={t('reorderAction')} />
+        <Kpi tone="watch" icon={CalendarClock} art="capsules" label={t('nearExpiryKpi')} value={String(nearExpiry)} note={t('expiryAlerts')} />
+        <Kpi tone="bad" icon={CalendarX2} art="generic" label={t('expiredDrugs')} value={String(home.expiredCount)} note={t('expired')} />
       </section>
       {home.stocking ? (
         <section className="kpi-row">
-          <Kpi tone="watch" icon={ClipboardList} label={t('buyPendingReceipts')} value={String(home.stocking.pendingReceipts)} note={t('poApproved')} />
-          <Kpi tone="info" icon={PackagePlus} label={t('buyReceived')} value={String(home.stocking.receivedLines)} note={t('procurement')} />
-          <Kpi tone="watch" icon={Layers} label={t('invReady')} value={String(home.stocking.awaitingPosting)} note={String(home.stocking.pendingQty)} />
-          <Kpi tone="ok" icon={PackageCheck} label={t('invOnHand')} value={String(home.stocking.availableQty)} note={t('invNewStock') + ' ' + home.stocking.newlyStocked} />
+          <Kpi tone="watch" icon={ClipboardList} art="infusion" label={t('buyPendingReceipts')} value={String(home.stocking.pendingReceipts)} note={t('poApproved')} />
+          <Kpi tone="info" icon={PackagePlus} art="syrup" label={t('buyReceived')} value={String(home.stocking.receivedLines)} note={t('procurement')} />
+          <Kpi tone="watch" icon={Layers} art="powder" label={t('invReady')} value={String(home.stocking.awaitingPosting)} note={String(home.stocking.pendingQty)} />
+          <Kpi tone="ok" icon={PackageCheck} art="tablets" label={t('invOnHand')} value={String(home.stocking.availableQty)} note={t('invNewStock') + ' ' + home.stocking.newlyStocked} />
         </section>
       ) : null}
       <div className="dash-body">
@@ -899,20 +901,22 @@ function Kpi({
   label,
   value,
   note,
+  art,
 }: {
   tone: string;
   icon: LucideIcon;
   label: string;
   value: string;
   note: string;
+  art?: MedicineArtKey;
 }) {
   return (
     <article className={`kpi-card ${tone}`}>
       <span className="kpi-mark" aria-hidden="true">
-        <Icon size={23} strokeWidth={2.1} />
+        {art ? <MedicineIllustration dosageForm={art} size={28} /> : <Icon size={23} strokeWidth={2.1} />}
       </span>
       <em>{label}</em>
-      <strong>{value}</strong>
+      <strong className="kpi-figure">{value}</strong>
       <small>{note}</small>
     </article>
   );

@@ -112,8 +112,44 @@ build_api() {
   ok "API built"
 }
 
+ensure_header_limits() {
+  step "HTTP header size (avoid 431 Request Header Fields Too Large)"
+  local unit=/etc/systemd/system/${SERVICE}.service
+  if [ -f "$unit" ]; then
+    if grep -q 'max-http-header-size' "$unit"; then
+      ok "systemd already sets max-http-header-size"
+    else
+      cp "$unit" "$unit.bak.$(date +%s)"
+      if grep -q '^\[Service\]' "$unit"; then
+        sed -i '/^\[Service\]/a Environment=NODE_OPTIONS=--max-http-header-size=65536' "$unit"
+      else
+        printf '\n[Service]\nEnvironment=NODE_OPTIONS=--max-http-header-size=65536\n' >>"$unit"
+      fi
+      systemctl daemon-reload || die "systemd daemon-reload failed"
+      ok "systemd NODE_OPTIONS=--max-http-header-size=65536"
+    fi
+  else
+    bad "Missing $unit — set NODE_OPTIONS=--max-http-header-size=65536 on the API process"
+  fi
+
+  if [ -f "$SITE" ]; then
+    if grep -q 'large_client_header_buffers' "$SITE"; then
+      ok "nginx large_client_header_buffers already set"
+    else
+      cp "$SITE" "$SITE.bak.$(date +%s)"
+      sed -i '/server_name/a\    client_header_buffer_size 16k;\n    large_client_header_buffers 4 32k;' "$SITE"
+      nginx -t >/dev/null 2>&1 || { nginx -t; die "nginx config invalid after header buffers"; }
+      systemctl reload nginx || die "nginx reload failed"
+      ok "nginx client_header_buffer_size 16k + large_client_header_buffers 4 32k"
+    fi
+  else
+    bad "Missing $SITE — add large_client_header_buffers 4 32k in the server block"
+  fi
+}
+
 restart_api() {
   step "Restart API"
+  ensure_header_limits
   systemctl restart "$SERVICE" || die "restart failed"
   for i in $(seq 1 20); do
     curl -sf "http://127.0.0.1:$API_PORT/api/v1/health" >/dev/null && { ok "API is up after ${i}s"; return; }
@@ -236,10 +272,10 @@ health() {
   echo "  Pending OS updates: $(apt list --upgradable 2>/dev/null | grep -c upgradable)"
 }
 
-full_deploy()   { backup_db; pull; migrate_db; build_api; build_web; restart_api; smoke_test; }
-backend_only()  { pull; build_api; restart_api; smoke_test; }
-frontend_only() { pull; build_web; smoke_test; }
-restart_all()   { step "Restart services"; systemctl restart mssql-server && ok "SQL Server"; sleep 3; restart_api; systemctl reload nginx && ok "nginx reloaded"; smoke_test; }
+full_deploy()   { backup_db; pull; migrate_db; build_api; build_web; ensure_header_limits; restart_api; smoke_test; }
+backend_only()  { pull; build_api; ensure_header_limits; restart_api; smoke_test; }
+frontend_only() { pull; build_web; ensure_header_limits; smoke_test; }
+restart_all()   { step "Restart services"; systemctl restart mssql-server && ok "SQL Server"; sleep 3; ensure_header_limits; restart_api; systemctl reload nginx && ok "nginx reloaded"; smoke_test; }
 
 run() {
   echo "[$(date '+%F %T')] option $1" >>"$LOG"

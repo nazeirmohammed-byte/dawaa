@@ -225,7 +225,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
             <span className="nav-label">{t('control')}</span>
           </Link>
           {groups.map((group) => (
-            <section className="nav-section" key={group.id} aria-label={t(group.label)}>
+            <section className={`nav-section ${group.id}`} key={group.id} aria-label={t(group.label)}>
               <p className="nav-section-title">
                 <NavIcon name={group.label} size={14} />
                 <span>{t(group.label)}</span>

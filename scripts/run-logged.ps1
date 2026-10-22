@@ -32,6 +32,8 @@ $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError = $true
 $psi.CreateNoWindow = $true
 $psi.EnvironmentVariables['API_PORT'] = '4190'
+# Avoid HTTP 431 (Request Header Fields Too Large) when cookies/proxy headers grow.
+$psi.EnvironmentVariables['NODE_OPTIONS'] = '--max-http-header-size=65536'
 
 $proc = New-Object System.Diagnostics.Process
 $proc.StartInfo = $psi

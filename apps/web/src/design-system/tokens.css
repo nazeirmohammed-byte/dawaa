@@ -4,16 +4,16 @@
 :root {
   color-scheme: light;
 
-  /* Brand — crisp, saturated, high-contrast */
-  --dawaa-primary: #087f8c;
-  --dawaa-primary-strong: #066a76;
-  --dawaa-primary-dark: #164e63;
-  --dawaa-secondary: #12a37c;
-  --dawaa-bg: #e9f1f5;
-  --dawaa-surface: #ffffff;
-  --dawaa-text: #14263c;
-  --dawaa-text-muted: #4d6376;
-  --dawaa-border: #bfcfdb;
+  /* Brand — clinical medical teal, distinct from admin indigo */
+  --dawaa-primary: #0d7c78;
+  --dawaa-primary-strong: #0a6562;
+  --dawaa-primary-dark: #123f43;
+  --dawaa-secondary: #1a9d7c;
+  --dawaa-bg: #e6f4f1;
+  --dawaa-surface: #f7fcfb;
+  --dawaa-text: #14323a;
+  --dawaa-text-muted: #4a6b70;
+  --dawaa-border: #c3ddd7;
   --dawaa-success: #0b7a5c;
   --dawaa-success-bright: #12a37c;
   --dawaa-success-soft: #d9f4e8;
@@ -75,7 +75,7 @@
   --red: var(--dawaa-danger);
   --red-2: var(--dawaa-danger-dark);
   --mint: var(--dawaa-success-soft);
-  --sky: #d9edf2;
+  --sky: #d4efe9;
   --rose: var(--dawaa-danger-soft);
   --cream: var(--dawaa-bg);
   --paper: var(--dawaa-surface);
@@ -88,8 +88,8 @@
   --watch-soft: var(--dawaa-warning-soft);
   --ok: var(--dawaa-success);
   --ok-soft: var(--dawaa-success-soft);
-  --sidebar: var(--dawaa-primary-dark);
-  --sidebar-text: #eef6f8;
+  --sidebar: #123f43;
+  --sidebar-text: #e8f6f2;
   --sidebar-active: var(--dawaa-secondary);
   --shadow: var(--dawaa-shadow-md);
 }

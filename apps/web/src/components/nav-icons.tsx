@@ -20,6 +20,7 @@ import {
   Wallet,
   type LucideIcon,
 } from 'lucide-react';
+import { medicineArtSrc } from '../design-system/medicine-art';
 
 const ICONS: Record<string, LucideIcon> = {
   control: LayoutDashboard,
@@ -52,7 +53,26 @@ const ICONS: Record<string, LucideIcon> = {
   groupSetup: Settings,
 };
 
+const ART: Record<string, string> = {
+  quickPos: medicineArtSrc('syrup'),
+  sales: medicineArtSrc('tablets'),
+  medicines: medicineArtSrc('tablets'),
+  inventory: medicineArtSrc('syrup'),
+  prices: medicineArtSrc('sachet'),
+  alerts: medicineArtSrc('generic'),
+  procurement: medicineArtSrc('infusion'),
+  prescriptions: medicineArtSrc('capsules'),
+  groupSell: medicineArtSrc('syrup'),
+  groupStock: medicineArtSrc('tablets'),
+  groupBuy: medicineArtSrc('infusion'),
+  groupPeople: medicineArtSrc('capsules'),
+};
+
 export function NavIcon({ name, size = 18 }: { name: string; size?: number }) {
+  const src = ART[name];
+  if (src) {
+    return <img className="nav-ico-img" src={src} width={size} height={size} alt="" aria-hidden="true" />;
+  }
   const Icon = ICONS[name] ?? LayoutDashboard;
   return <Icon className="nav-ico-lucide" size={size} strokeWidth={2} aria-hidden="true" />;
 }
